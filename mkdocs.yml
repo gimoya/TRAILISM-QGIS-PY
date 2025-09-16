@@ -1,0 +1,54 @@
+site_name: TRAILISM QGIS Processing
+site_description: QGIS Processing tools for trail design and geometry
+# repo_url: https://github.com/REPLACE_ME/TRAILISM-QGIS-PY
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - content.code.copy
+  palette:
+    - scheme: default
+      primary: blue
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: blue
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path:
+        - docs
+        - .
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/REPLACE_ME/TRAILISM-QGIS-PY
+
+# Navigation: omit to let MkDocs auto-generate from docs/ structure.
+# If you prefer explicit ordering later, add a `nav:` section.
+
+
