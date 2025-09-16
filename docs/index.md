@@ -1,5 +1,5 @@
-# TRAILISM QGIS Processing
+# TRAILISM
 
---8<-- "../README.md"
+--8<-- "README.md"
 
 
