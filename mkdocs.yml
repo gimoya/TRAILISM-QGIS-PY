@@ -1,6 +1,6 @@
 site_name: TRAILISM QGIS Processing
 site_description: QGIS Processing tools for trail design and geometry
-# repo_url: https://github.com/REPLACE_ME/TRAILISM-QGIS-PY
+repo_url: https://github.com/gimoya/TRAILISM-QGIS-PY
 
 theme:
   name: material
@@ -46,9 +46,13 @@ markdown_extensions:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/REPLACE_ME/TRAILISM-QGIS-PY
+      link: https://github.com/gimoya/TRAILISM-QGIS-PY
 
-# Navigation: omit to let MkDocs auto-generate from docs/ structure.
-# If you prefer explicit ordering later, add a `nav:` section.
+nav:
+  - Home: index.md
+  - Tools:
+      - Find Curves: tools/curve-detection.md
+      - Round Corner by Min/Max Radius: tools/round-corner-radius.md
+      - Cross-Section Profiles: tools/transect-profiles.md
 
 
