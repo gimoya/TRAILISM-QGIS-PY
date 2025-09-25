@@ -17,6 +17,6 @@ else
 fi
 
 echo "Pushing..."
-git push -u origin master
+git push -u origin main
 
 read -p "Press [Enter] to continue..."
