@@ -241,6 +241,10 @@ def main() -> int:
     print(f"Created sidecar: {os.path.relpath(sidecar_path, repo_root)}")
     print(f"Created docs page: {os.path.relpath(docs_page_path, repo_root)}")
     print("Updated mkdocs.yml nav")
+    print("\nREMINDER: Update README.md to include the new tool:")
+    print("  - Add tool to the list at the top")
+    print("  - Add tool description in 'Tools overview' section")
+    print("  - Add sidecar .md file to 'Sidecar docs' section")
 
     if args.validate:
         try:

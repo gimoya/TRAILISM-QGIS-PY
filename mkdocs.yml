@@ -48,6 +48,11 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/gimoya/TRAILISM-QGIS-PY
 
+# NOTE: When adding a new tool, also update README.md:
+# - Add tool to the list at the top
+# - Add tool description in "Tools overview" section
+# - Add sidecar .md file to "Sidecar docs" section
+# The docs homepage (docs/index.md) includes README.md, so keeping README updated ensures the GitHub repo and docs site stay in sync.
 nav:
   - Home: index.md
   - Tools:
