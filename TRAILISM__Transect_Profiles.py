@@ -3,6 +3,10 @@ from qgis.PyQt.QtCore import QVariant, QUrl  # type: ignore[import]
 from qgis.PyQt.QtGui import QDesktopServices  # type: ignore[import]
 import math
 import os
+
+# Matplotlib will be imported lazily to avoid circular import issues
+# This is a common problem in QGIS processing algorithms
+
 from qgis.core import (  # type: ignore[import]
 	QgsProcessing,
 	QgsProcessingAlgorithm,
@@ -34,6 +38,56 @@ from qgis.core import (  # type: ignore[import]
 
 # Unified matplotlib bbox style for in-plot labels
 MPL_BBOX = dict(boxstyle="round,pad=0.15", facecolor="white", edgecolor="none", alpha=0.5)
+
+# Safe matplotlib import function to avoid circular import issues
+def _safe_import_matplotlib():
+	"""
+	Safely import matplotlib components, handling circular import issues
+	and missing dependencies that can occur in QGIS processing algorithms.
+	Returns: (success, plt, MultipleLocator, error_message)
+	"""
+	try:
+		# Clear any existing matplotlib modules to avoid circular imports
+		import sys
+		modules_to_clear = [k for k in sys.modules.keys() if k.startswith('matplotlib')]
+		for module in modules_to_clear:
+			if module in sys.modules:
+				del sys.modules[module]
+		
+		# Mock dateutil.rrule if missing to avoid matplotlib import failure
+		try:
+			import dateutil.rrule
+		except ImportError:
+			# Create a comprehensive mock for dateutil
+			class MockRRule:
+				def __init__(self, *args, **kwargs):
+					pass
+			
+			class MockDateutil:
+				__version__ = "2.8.2"
+				def __getattr__(self, name):
+					return MockDateutil()
+				def __iter__(self):
+					return iter([])
+				def __len__(self):
+					return 0
+			
+			import sys
+			sys.modules['dateutil'] = MockDateutil()
+			sys.modules['dateutil.rrule'] = MockDateutil()
+			sys.modules['dateutil.rrule'].rrule = MockRRule
+			sys.modules['dateutil.rrule'].rrulestr = lambda x: MockRRule()
+			sys.modules['dateutil.rrule'].rruleset = MockDateutil()
+		
+		# Import matplotlib with Agg backend
+		import matplotlib
+		matplotlib.use("Agg")
+		from matplotlib import pyplot as plt
+		from matplotlib.ticker import MultipleLocator
+		
+		return True, plt, MultipleLocator, None
+	except Exception as e:
+		return False, None, None, str(e)
 
 # Safe filename token from arbitrary text
 def _sanitize_filename_component(txt):
@@ -1016,10 +1070,14 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 							# Create SVG
 							# We show: DEM profile (smoothed for gaps), flat trail between edges,
 							# side slopes to C points, helper dimensions, and labels A/L/R/C.
-							import matplotlib
-							matplotlib.use("Agg")
-							from matplotlib import pyplot as plt
-							from matplotlib.ticker import MultipleLocator
+							
+							# Safely import matplotlib when needed
+							matplotlib_available, plt, MultipleLocator, matplotlib_error = _safe_import_matplotlib()
+							if not matplotlib_available:
+								error_msg = f"Matplotlib not available - skipping SVG generation. Error: {matplotlib_error}"
+								feedback.pushWarning(error_msg)
+								# Continue processing without SVG - algorithm still works for other outputs
+								continue
 
 							fig, ax = plt.subplots(1, 1, figsize=(8, 5))
 							# Filter None by simple forward-fill for plotting continuity
@@ -1314,10 +1372,11 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 							ax.grid(True, which="major", axis="both", alpha=0.3)
 							# Make axes frame look like grid lines and shrink tick labels slightly
 							try:
-								import matplotlib as mpl
-								grid_color = mpl.rcParams.get("grid.color", "#b0b0b0")
-								grid_alpha = float(mpl.rcParams.get("grid.alpha", 0.3))
-								grid_lw = float(mpl.rcParams.get("grid.linewidth", 0.8))
+								# Import matplotlib for rcParams access
+								import matplotlib
+								grid_color = matplotlib.rcParams.get("grid.color", "#b0b0b0")
+								grid_alpha = float(matplotlib.rcParams.get("grid.alpha", 0.3))
+								grid_lw = float(matplotlib.rcParams.get("grid.linewidth", 0.8))
 								for _sp in ax.spines.values():
 									_sp.set_edgecolor(grid_color)
 									_sp.set_alpha(grid_alpha)
@@ -1460,6 +1519,7 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 								svg_count += 1
 							finally:
 								plt.close(fig)
+								plt.close('all')  # Force cleanup of all figures to prevent memory leaks
 							if svg_open:
 								try:
 									QDesktopServices.openUrl(QUrl.fromLocalFile(out_path))

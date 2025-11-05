@@ -53,6 +53,8 @@ nav:
   - Tools:
       - Find Curves: tools/curve-detection.md
       - Round Corner by Min/Max Radius: tools/round-corner-radius.md
+      - Round Corner with Fixed Radius: tools/round-corner-fixed-radius.md
       - Cross-Section Profiles: tools/transect-profiles.md
+      - Raster Extrema Points: tools/raster-extrema.md
 
 
