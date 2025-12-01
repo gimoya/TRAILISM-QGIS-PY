@@ -1,11 +1,12 @@
 # TRAILISM QGIS Processing Scripts
 
-Lightweight processing algorithms for QGIS focused on trail design and geometry work. This repo currently contains five tools:
+Lightweight processing algorithms for QGIS focused on trail design and geometry work. This repo currently contains six tools:
 
 - TRAILISM: Find Curves — Detects curve apex points along linework
 - TRAILISM: Round Corner by Min/Max Radius — Inserts circular fillets at polyline corners
 - TRAILISM: Round Corner with Fixed Radius — Rounds corners with a fixed radius applied to all vertices
-- TRAILISM: Raster Extrema Points — Finds minimum and maximum raster values within polygon features
+- TRAILISM: Raster Extrema to Points — Finds minimum and maximum raster values within polygon features
+- TRAILISM: Raster Find Tree Tips — Creates slope prominence raster for tree canopy detection
 - TRAILISM: Cross-Section Profiles — Samples DEM cross-sections, finds slope intersections, computes per-station cut/fill, and (optionally) exports 1:1 SVGs
 
 
@@ -54,12 +55,17 @@ Option B — As part of a plugin/provider (advanced):
 - Key parameters: fixed radius, max chord length
 - Output: new line layer with fixed-radius fillets applied to all corners
 
-4) TRAILISM: Raster Extrema Points
+4) TRAILISM: Raster Extrema to Points
 - Inputs: raster layer and polygon layer
 - Key parameters: extrema type (maxima, minima, or both)
 - Output: point layer marking locations of minimum/maximum raster values within each polygon
 
-5) TRAILISM: Cross-Section Profiles
+5) TRAILISM: Raster Find Tree Tips
+- Input: raster layer (typically DEM/elevation)
+- Key parameters: looking distance, minimum threshold (degrees)
+- Output: raster layer with average slope angles in degrees (positive values = peaks/tree tips)
+
+6) TRAILISM: Cross-Section Profiles
 - Inputs: trail centerline (line) and DEM raster
 - Key parameters: station spacing, width (field or default), profile half-range R, side slope angle β1, DEM offset, axis dz or full cut/fill modes, SVG options
 - Outputs:
@@ -95,6 +101,7 @@ See one-pagers next to each script for precise parameters, outputs, and tips:
 - TRAILISM__Round_Corner_Linestrings_Radius.md
 - TRAILISM__Round_Corner_Fixed_Radius.md
 - TRAILISM__Raster_Extrema.md
+- TRAILISM__Raster_Find_Tree_Tips.md
 - TRAILISM__Transect_Profiles.md
 
 

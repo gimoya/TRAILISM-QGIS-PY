@@ -55,7 +55,7 @@ class RasterExtremaAlgorithm(QgsProcessingAlgorithm):
         return 'raster_extrema'
 
     def displayName(self):
-        return 'TRAILISM: Raster Extrema Points'
+        return 'TRAILISM: Raster Extrema to Points'
 
     def shortHelpString(self):
         return (
@@ -129,6 +129,19 @@ class RasterExtremaAlgorithm(QgsProcessingAlgorithm):
         dp = raster_layer.dataProvider()
         raster_extent = raster_layer.extent()
         crs = raster_layer.crs()
+        
+        # Initialize output sink early for cancellation handling
+        fields = QgsFields()
+        fields.append(QgsField("extrema_type", QVariant.String))
+        fields.append(QgsField("value", QVariant.Double))
+        fields.append(QgsField("polygon_id", QVariant.Int))
+
+        sink, dest_id = self.parameterAsSink(
+            parameters, self.OUTPUT, context, fields, QgsWkbTypes.Point, crs
+        )
+
+        if sink is None:
+            raise QgsProcessingException("Invalid output sink")
         nodata = dp.sourceNoDataValue(1) if hasattr(dp, "sourceNoDataValue") else None
 
         # Get raster dimensions
@@ -240,19 +253,6 @@ class RasterExtremaAlgorithm(QgsProcessingAlgorithm):
         if not raster_data:
             raise QgsProcessingException("No valid raster cells found in processing area")
 
-        # Prepare output fields
-        fields = QgsFields()
-        fields.append(QgsField("extrema_type", QVariant.String))
-        fields.append(QgsField("value", QVariant.Double))
-        fields.append(QgsField("polygon_id", QVariant.Int))
-
-        sink, dest_id = self.parameterAsSink(
-            parameters, self.OUTPUT, context, fields, QgsWkbTypes.Point, crs
-        )
-
-        if sink is None:
-            raise QgsProcessingException("Invalid output sink")
-
         # Process each polygon separately
         all_points = []
         
@@ -357,3 +357,4 @@ class RasterExtremaAlgorithm(QgsProcessingAlgorithm):
             layer.triggerRepaint()
 
         return {self.OUTPUT: dest_id}
+
