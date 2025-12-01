@@ -62,5 +62,7 @@ nav:
       - Cross-Section Profiles: tools/transect-profiles.md
       - Raster Extrema to Points: tools/raster-extrema.md
       - Raster Find Tree Tips: tools/raster-find-tree-tips.md
+      - Raster Replace DSM with DEM: tools/raster-replace.md
+      - Add Trail Shapes: tools/add-trail-shapes.md
 
 

@@ -1,12 +1,14 @@
 # TRAILISM QGIS Processing Scripts
 
-Lightweight processing algorithms for QGIS focused on trail design and geometry work. This repo currently contains six tools:
+Lightweight processing algorithms for QGIS focused on trail design and geometry work. This repo currently contains eight tools:
 
 - TRAILISM: Find Curves — Detects curve apex points along linework
 - TRAILISM: Round Corner by Min/Max Radius — Inserts circular fillets at polyline corners
 - TRAILISM: Round Corner with Fixed Radius — Rounds corners with a fixed radius applied to all vertices
 - TRAILISM: Raster Extrema to Points — Finds minimum and maximum raster values within polygon features
 - TRAILISM: Raster Find Tree Tips — Creates slope prominence raster for tree canopy detection
+- TRAILISM: Raster Replace DSM with DEM — Replaces DSM values with DEM values within polygon areas
+- TRAILISM: Add Trail Shapes — Creates 3D trail models with curve banking and shapes, exports GLTF/GLB
 - TRAILISM: Cross-Section Profiles — Samples DEM cross-sections, finds slope intersections, computes per-station cut/fill, and (optionally) exports 1:1 SVGs
 
 
@@ -65,7 +67,17 @@ Option B — As part of a plugin/provider (advanced):
 - Key parameters: looking distance, minimum threshold (degrees)
 - Output: raster layer with average slope angles in degrees (positive values = peaks/tree tips)
 
-6) TRAILISM: Cross-Section Profiles
+6) TRAILISM: Raster Replace DSM with DEM
+- Inputs: DSM raster, DEM raster, polygon layer
+- Key parameters: level ground option
+- Output: raster layer with DSM values replaced by DEM values in polygon areas
+
+7) TRAILISM: Add Trail Shapes
+- Inputs: line layer (trail centerline), DEM raster
+- Key parameters: Z raise, curve banking, shapes (sigmoid bumps), transversal concavity
+- Output: GLTF/GLB 3D mesh files exported to project home directory
+
+8) TRAILISM: Cross-Section Profiles
 - Inputs: trail centerline (line) and DEM raster
 - Key parameters: station spacing, width (field or default), profile half-range R, side slope angle β1, DEM offset, axis dz or full cut/fill modes, SVG options
 - Outputs:
@@ -102,6 +114,8 @@ See one-pagers next to each script for precise parameters, outputs, and tips:
 - TRAILISM__Round_Corner_Fixed_Radius.md
 - TRAILISM__Raster_Extrema.md
 - TRAILISM__Raster_Find_Tree_Tips.md
+- TRAILISM__Raster_Replace.md
+- TRAILISM__Add_Trail_Shapes.md
 - TRAILISM__Transect_Profiles.md
 
 
