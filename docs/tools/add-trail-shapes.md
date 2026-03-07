@@ -61,8 +61,9 @@ Creates 3D trail models with curve banking, transversal concavity, and optional 
 
 ### Outputs
 - **GLTF/GLB files**: Exported ribbon meshes saved to the project home directory
-  - Filename format: `{layer_name}_{feature_id}.gltf` or `.glb`
+  - Filename from feature `name` field or `ribbon_feature_{id}`.gltf/.glb
   - Original layer is not modified
+- **Combined GeoJSON** (`ribbons_points.geojson`): One Point feature per exported ribbon. Properties: `x`, `y`, `z`, `rotation`, `addend` (Qgis2threejs); `ribbon_path` (full path to that feature's ribbon file); `processing_input` (JSON string of algorithm inputs for processing scripts).
 
 ### Behavior
 

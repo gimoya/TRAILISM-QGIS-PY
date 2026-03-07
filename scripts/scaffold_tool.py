@@ -7,6 +7,7 @@ What it does:
   (title, algorithm id, short help, inputs/outputs/parameters when discoverable).
 - Creates a docs page under docs/tools/ that includes the sidecar via MkDocs snippets.
 - Inserts the new page into mkdocs.yml navigation under the Tools section (if not already present).
+- Refreshes the README tools list from all .py files that have a same-named .md (title and description from .md or .py).
 - Optionally runs a local mkdocs build for validation.
 
 Usage examples:
@@ -30,7 +31,9 @@ def read_text(path: str) -> str:
 
 
 def write_text(path: str, content: str) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
 
@@ -53,7 +56,7 @@ def infer_algorithm_id(py_src: str) -> Optional[str]:
 
 def infer_short_help(py_src: str) -> Optional[str]:
     # shortHelpString returns self.tr('...') possibly concatenated. Capture within the first return.
-    m = re.search(r"def\s+shortHelpString\s*\(.*?\):\s*return\s+self\.tr\(\s*(?P<body>(?:[^\)]|\)(?!\)))+\)\s*", py_src, re.DOTALL)
+    m = re.search(r"def\s+shortHelpString\s*\(.*?\):\s*return\s+self\.tr\(\s*(?P<body>(?:[^\)]|\)(?!\)\)))+\)\s*", py_src, re.DOTALL)
     if not m:
         return None
     body = m.group("body")
@@ -167,6 +170,100 @@ def make_sidecar_content(title: str, alg_id: Optional[str], help_text: Optional[
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _first_heading_text(md_content: str) -> Optional[str]:
+    """First line that starts with ## (with optional leading whitespace); strip the # and whitespace."""
+    for line in md_content.splitlines():
+        s = line.strip()
+        if s.startswith("##"):
+            return s.lstrip("#").strip()
+    return None
+
+
+def _first_description_from_md(md_content: str) -> str:
+    """First paragraph of body text: after ### What it does, or first non-heading paragraph. Single line, max ~120 chars."""
+    paragraphs = re.split(r"\n\s*\n", md_content)
+    for p in paragraphs:
+        lines = p.strip().splitlines()
+        if not lines:
+            continue
+        first = lines[0].strip()
+        if first.startswith("#"):
+            if "what it does" in first.lower() and len(lines) > 1:
+                desc = " ".join(lines[1:]).strip()
+                if len(desc) > 120:
+                    desc = desc[:117] + "..."
+                return desc
+            continue
+        desc = p.strip()
+        if len(desc) > 120:
+            desc = desc[:117] + "..."
+        return desc
+    return ""
+
+
+def discover_tools(repo_root: str) -> List[Tuple[str, str, str]]:
+    """Find all TRAILISM__*.py that have a same-named .md. Return list of (base_name, title, description) sorted by base_name."""
+    tools: List[Tuple[str, str, str]] = []
+    if not os.path.isdir(repo_root):
+        return tools
+    for name in sorted(os.listdir(repo_root)):
+        if not name.startswith("TRAILISM__") or not name.endswith(".py"):
+            continue
+        base = name[:-3]
+        md_name = base + ".md"
+        md_path = os.path.join(repo_root, md_name)
+        py_path = os.path.join(repo_root, name)
+        if not os.path.isfile(md_path) or not os.path.isfile(py_path):
+            continue
+        md_content = read_text(md_path)
+        py_src = read_text(py_path)
+        title = _first_heading_text(md_content) or infer_display_name(py_src) or base
+        description = _first_description_from_md(md_content)
+        if not description and infer_short_help(py_src):
+            help_text = infer_short_help(py_src)
+            first = help_text.split("\n\n")[0].strip()
+            if len(first) > 120:
+                first = first[:117] + "..."
+            description = first
+        if not description:
+            description = "No description"
+        tools.append((base, title, description))
+    return tools
+
+
+def update_readme_tools_list(repo_root: str) -> None:
+    readme_path = os.path.join(repo_root, "README.md")
+    if not os.path.isfile(readme_path):
+        return
+    content = read_text(readme_path)
+    begin_marker = "<!-- TOOLS LIST BEGIN -->"
+    end_marker = "<!-- TOOLS LIST END -->"
+    if begin_marker not in content or end_marker not in content:
+        return
+    tools = discover_tools(repo_root)
+    if not tools:
+        return
+    bullets = "\n".join(f"- {title} — {desc}" for (_base, title, desc) in tools)
+    intro_match = re.search(
+        r"This repo currently contains (?:eight|\d+) tools:\s*" + re.escape(begin_marker),
+        content,
+    )
+    if not intro_match:
+        return
+    suffix_start = content.find(end_marker) + len(end_marker)
+    new_content = (
+        content[: intro_match.start()]
+        + f"This repo currently contains {len(tools)} tools:\n\n"
+        + begin_marker
+        + "\n"
+        + bullets
+        + "\n"
+        + end_marker
+        + content[suffix_start:]
+    )
+    write_text(readme_path, new_content)
+
+
 def update_mkdocs_nav(mkdocs_path: str, title: str, slug: str) -> None:
     y = read_text(mkdocs_path)
     if f"tools/{slug}.md" in y:
@@ -238,13 +335,13 @@ def main() -> int:
     mkdocs_path = os.path.join(repo_root, "mkdocs.yml")
     update_mkdocs_nav(mkdocs_path, display_name, slug)
 
+    # README tools list (from all .py + same-named .md in repo root)
+    update_readme_tools_list(repo_root)
+
     print(f"Created sidecar: {os.path.relpath(sidecar_path, repo_root)}")
     print(f"Created docs page: {os.path.relpath(docs_page_path, repo_root)}")
     print("Updated mkdocs.yml nav")
-    print("\nREMINDER: Update README.md to include the new tool:")
-    print("  - Add tool to the list at the top")
-    print("  - Add tool description in 'Tools overview' section")
-    print("  - Add sidecar .md file to 'Sidecar docs' section")
+    print("Updated README.md tools list")
 
     if args.validate:
         try:
