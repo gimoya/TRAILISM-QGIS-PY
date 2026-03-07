@@ -56,6 +56,7 @@ extra:
 nav:
   - Home: index.md
   - Tools:
+      - TRAILISM: Trail Shaping: tools/trailism-trail-shaping.md
       - Find Curves: tools/curve-detection.md
       - Round Corner by Min/Max Radius: tools/round-corner-radius.md
       - Round Corner with Fixed Radius: tools/round-corner-fixed-radius.md

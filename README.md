@@ -1,15 +1,17 @@
 # TRAILISM QGIS Processing Scripts
 
-Lightweight processing algorithms for QGIS focused on trail design and geometry work. This repo currently contains eight tools:
+Lightweight processing algorithms for QGIS focused on trail design and geometry work. This repo currently contains 8 tools:
 
-- TRAILISM: Find Curves — Detects curve apex points along linework
-- TRAILISM: Round Corner by Min/Max Radius — Inserts circular fillets at polyline corners
-- TRAILISM: Round Corner with Fixed Radius — Rounds corners with a fixed radius applied to all vertices
-- TRAILISM: Raster Extrema to Points — Finds minimum and maximum raster values within polygon features
-- TRAILISM: Raster Find Tree Tips — Creates slope prominence raster for tree canopy detection
-- TRAILISM: Raster Replace DSM with DEM — Replaces DSM values with DEM values within polygon areas
-- TRAILISM: Add Trail Shapes — Creates 3D trail models with curve banking and shapes, exports GLTF/GLB
-- TRAILISM: Cross-Section Profiles — Samples DEM cross-sections, finds slope intersections, computes per-station cut/fill, and (optionally) exports 1:1 SVGs
+<!-- TOOLS LIST BEGIN -->
+- TRAILISM: Find Curves — Detects curve sections in a line layer and marks likely apex points based on arc-length to chord-length patterns betw...
+- TRAILISM: GPX Checkpoint Times — Start/end point layers (WGS84), folder of GPX files. Pairs by position: start1-end1, start2-end2. Output: matched seg...
+- TRAILISM: Raster Find Tree Tips — Creates an average slope angle raster map for tree canopy detection. For each cell, calculates the average slope angl...
+- TRAILISM: Raster Find Tree Tips (vectorized) — Same logic as **Raster Find Tree Tips**: average slope angle in 8 directions vs path-average elevation along each ray...
+- TRAILISM: Raster Replace DSM with DEM — Replaces DSM raster values with DEM raster values within polygon areas. DSM (Digital Surface Model) includes vegetati...
+- TRAILISM: Round Corner by Min/Max Radius — Smooths polyline corners by inserting a single circular arc per vertex inside the smaller angle. Optionally draws out...
+- TRAILISM: Trail Shaping — No description
+- TRAILISM: Cross-Section Profiles — Samples DEM cross-sections perpendicular to a centerline at fixed stations, finds slope intersections from each trail...
+<!-- TOOLS LIST END -->
 
 
 ## Requirements

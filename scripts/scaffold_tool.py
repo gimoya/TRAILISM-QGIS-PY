@@ -55,11 +55,35 @@ def infer_algorithm_id(py_src: str) -> Optional[str]:
 
 
 def infer_short_help(py_src: str) -> Optional[str]:
-    # shortHelpString returns self.tr('...') possibly concatenated. Capture within the first return.
-    m = re.search(r"def\s+shortHelpString\s*\(.*?\):\s*return\s+self\.tr\(\s*(?P<body>(?:[^\)]|\)(?!\)\)))+\)\s*", py_src, re.DOTALL)
+    # shortHelpString returns self.tr('...') possibly concatenated. Find tr( and match to closing ), skipping string literals.
+    m = re.search(r"def\s+shortHelpString\s*\([^)]*\):\s*return\s+self\.tr\s*\(", py_src)
     if not m:
         return None
-    body = m.group("body")
+    start = m.end()
+    depth = 1
+    i = start
+    while i < len(py_src) and depth > 0:
+        # Skip string literals so parens inside don't break depth
+        if py_src[i] in ("'", '"') and (i == 0 or py_src[i - 1] != "\\"):
+            quote = py_src[i]
+            i += 1
+            while i < len(py_src):
+                if py_src[i] == "\\":
+                    i += 2
+                    continue
+                if py_src[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            continue
+        if py_src[i] == "(":
+            depth += 1
+        elif py_src[i] == ")":
+            depth -= 1
+        i += 1
+    if depth != 0:
+        return None
+    body = py_src[start : i - 1]
     # Extract concatenated string literals inside tr(...)
     lits = re.findall(r"(['\"])(.*?)\1", body, re.DOTALL)
     text = "".join(seg for _q, seg in lits)
