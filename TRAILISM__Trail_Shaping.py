@@ -22,6 +22,7 @@ from qgis.core import (
     QgsProcessingParameterEnum,
     QgsProcessingParameterField,
     QgsProcessingParameterFile,
+    QgsProcessingParameterFileDestination,
     QgsProcessingException,
     QgsPoint,
     QgsPointXY,
@@ -82,6 +83,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
     SIGMOID_LENGTHS = 'SIGMOID_LENGTHS'
     SHAPE_ARC_RADIUS_FACTOR = 'SHAPE_ARC_RADIUS_FACTOR'
     SIMPLE_SHAPES = 'SIMPLE_SHAPES'
+    OUTPUT_GEOJSON = 'OUTPUT_GEOJSON'
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
@@ -299,6 +301,15 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                 type=QgsProcessingParameterNumber.Double,
                 defaultValue=1.0,
                 minValue=1.0,
+                optional=True
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterFileDestination(
+                self.OUTPUT_GEOJSON,
+                'Ribbon locations GeoJSON output file (optional)',
+                fileFilter='GeoJSON (*.geojson)',
                 optional=True
             )
         )
@@ -755,7 +766,12 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                         "type": "name",
                         "properties": {"name": f"urn:ogc:def:crs:{crs.authid().replace(':', '::')}"},
                     }
-                geojson_path = project_home / "ribbons_points.geojson"
+                user_geojson_path = self.parameterAsFileOutput(parameters, self.OUTPUT_GEOJSON, context)
+                if user_geojson_path:
+                    geojson_path = Path(user_geojson_path)
+                else:
+                    geojson_path = project_home / "ribbons_points.geojson"
+                geojson_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(geojson_path, 'w', encoding='utf-8') as f:
                     json.dump(combined_geojson, f, indent=2)
                 feedback.pushInfo(f"Exported combined point layer for Qgis2threejs to {geojson_path}")
@@ -2905,17 +2921,16 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                 json.dump(gltf, f, indent=2)
 
         # Point feature for combined GeoJSON (written once after all features by processAlgorithm).
-        # Geometry carries full 3D position [cx_crs, cy_crs, cz_crs]. Set properties.z = 0 so
-        # Qgis2threejs does not add centroid elevation again.
+        # Geometry and properties carry full 3D position for Qgis2threejs "3D Model on a point".
         point_feature = {
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [cx_crs, cy_crs, cz_crs]},
             "properties": {
-                "x": cx_crs,
-                "y": cy_crs,
-                "z": 0,
-                "rotation": 0,
-                "addend": 0,
+                "x": float(cx_crs),
+                "y": float(cy_crs),
+                "z": float(cz_crs),
+                "rotation": 0.0,
+                "addend": 0.0,
             },
         }
         if feedback:

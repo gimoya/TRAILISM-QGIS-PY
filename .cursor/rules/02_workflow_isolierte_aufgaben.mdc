@@ -1,0 +1,17 @@
+---
+description: "Fokussierte Chats für isolierte Aufgaben"
+globs: ["**/*.{sh,bat,py,js,css,html}"]
+alwaysApply: true
+---
+
+# Chat-Struktur
+
+## Empfohlene Arbeitsweise
+- Ein Chat = Eine spezifische Aufgabe
+- Keine Themenwechsel innerhalb eines Chats
+- Bei abgeschlossener Aufgabe: Bitte starte einen neuen Chat
+
+## Kontext-Management
+- Wenn ich den Faden verliere, starte bitte einen neuen Chat
+- Bei Unsicherheit: Nachfragen statt spekulieren
+- Alte Chats nicht für neue Aufgaben weiterverwenden

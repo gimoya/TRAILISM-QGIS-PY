@@ -1,0 +1,27 @@
+---
+description: "Task-optimierte Modellauswahl"
+globs: ["**/*.{sh,bat,py,js,css,html}"]
+alwaysApply: true
+---
+
+# Modell-Hierarchie
+
+## Leichte Modelle bevorzugen (Gemini Flash, GPT-4o-mini)
+- Standard für ALLE Routineaufgaben
+- Einfaches Debugging
+- Code-Erklärungen
+- Syntax-Fragen
+- Dokumentation
+- Code-Generierung
+
+## Frontier Modelle reservieren (Claude 3.7, GPT-5)
+- NUR für komplexe Architektur-Entscheidungen
+- Schwieriges Debugging mit vielen Abhängigkeiten
+- System-Design
+- Performance-Optimierung
+- Security-Reviews
+
+## Entscheidungshilfe
+- Bei Unsicherheit: Nachfragen, welches Modell gewünscht ist
+- Selbstständig einschätzen: Routine vs. Komplexität
+- Bei einfachen Aufgaben explizit leichtes Modell vorschlagen

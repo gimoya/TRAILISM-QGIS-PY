@@ -1,0 +1,18 @@
+---
+description: "Komplexe Logikplanung vor Cursor-Interaktion durchführen"
+globs: ["**/*.{sh,bat,py,js,css,html}"]
+alwaysApply: true
+---
+
+# Planungs-First Ansatz
+
+## Erwartungshaltung
+- Bevor du Cursor mit einer komplexen Aufgabe beauftragst, erstelle einen klaren Plan in:
+  - Markdown-Dateien im Projekt
+  - Externen Tools (Whiteboarding, separate Chats)
+- Cursor ist Ausführungswerkzeug, nicht Denkwerkzeug
+
+## Prompt-Qualität
+- Ich erwarte spezifische, durchdachte Prompts
+- Ein Prompt = Eine klar abgegrenzte Aufgabe
+- Keine vagen Anweisungen ("mach das besser", "optimier das")

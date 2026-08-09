@@ -1,6 +1,5 @@
 # pyright: reportMissingImports=false
-from qgis.PyQt.QtCore import QVariant, QUrl  # type: ignore[import]
-from qgis.PyQt.QtGui import QDesktopServices  # type: ignore[import]
+from qgis.PyQt.QtCore import QVariant  # type: ignore[import]
 import math
 import os
 from qgis.core import (  # type: ignore[import]
@@ -32,6 +31,19 @@ from qgis.core import (  # type: ignore[import]
 )
 
 
+# Matplotlib: Agg backend at import time, object-oriented API only (no pyplot).
+try:
+	import matplotlib
+	matplotlib.use("Agg")
+	from matplotlib.backends.backend_agg import FigureCanvasAgg
+	from matplotlib.figure import Figure
+	from matplotlib.ticker import MultipleLocator
+	import matplotlib as mpl
+	_MPL_AVAILABLE = True
+except ImportError:
+	_MPL_AVAILABLE = False
+
+
 # Unified matplotlib bbox style for in-plot labels
 MPL_BBOX = dict(boxstyle="round,pad=0.15", facecolor="white", edgecolor="none", alpha=0.5)
 
@@ -51,6 +63,24 @@ def _sanitize_filename_component(txt):
 			safe.append('_')
 	out = ''.join(safe).strip('_')
 	return out if out else "feat"
+
+def _format_dz_filename_token(dz):
+	"""Filesystem token for axis dz, e.g. _dz-0_75_ or _dz+0_25_."""
+	try:
+		d = float(dz)
+	except Exception:
+		return "_dz+0_"
+	if abs(d) < 1e-12:
+		return "_dz+0_"
+	sign = "+" if d > 0 else "-"
+	d_abs = abs(d)
+	rounded = round(d_abs, 2)
+	whole = int(rounded)
+	frac_part = round(rounded - whole, 10)
+	if frac_part < 1e-9:
+		return f"_dz{sign}{whole}_"
+	frac_s = f"{frac_part:.10f}".split(".")[1].rstrip("0")
+	return f"_dz{sign}{whole}_{frac_s}_"
 
 # This script defines a QGIS Processing tool that samples cross-sections
 # perpendicular to a trail/centerline and compares a simple "design" profile
@@ -80,6 +110,7 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 	BETA1_DEG = "BETA1_DEG"
 	PROFILE_RANGE_M = "PROFILE_RANGE_M"
 	AXIS_DZ = "AXIS_DZ"
+	AXIS_DZ_FIELD = "AXIS_DZ_FIELD"
 	AXIS_FULL_CUT = "AXIS_FULL_CUT"
 	AXIS_FULL_FILL = "AXIS_FULL_FILL"
 	DEM_OFFSET = "DEM_OFFSET"
@@ -98,7 +129,7 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 	OUT_TRANSECTS = "OUT_TRANSECTS"      # kept for compatibility; returns same as OUT_BC_SEGMENTS
 
 	# SVG preview controls
-	SVG_OPEN = "SVG_OPEN"
+	SVG_NAME_FIELD = "SVG_NAME_FIELD"
 	SVG_STATIONS = "SVG_STATIONS"
 	SVG_ALL_STATIONS = "SVG_ALL_STATIONS"
 
@@ -159,7 +190,7 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 		self.addParameter(
 			QgsProcessingParameterNumber(
 				self.DEM_OFFSET,
-				"DEM vertical offset (meters; -1 to 0). Applied globally to DEM for all calculations and plots.",
+				"DEM vertical offset for top-soil removal (meters; -1 to 0). Applied globally to DEM for all calculations and plots.",
 				QgsProcessingParameterNumber.Double,
 				defaultValue=-0.15,
 				minValue=-1,
@@ -170,11 +201,20 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 		self.addParameter(
 			QgsProcessingParameterNumber(
 				self.AXIS_DZ,
-				"Axis elevation offset dz (meters; -2.5 to 2.5). z0 := DEM + dz unless overridden by full cut/fill mode.",
+				"Default axis elevation offset dz (meters; -2.5 to 2.5). z0 := DEM + dz unless overridden by full cut/fill mode or dz field.",
 				QgsProcessingParameterNumber.Double,
 				defaultValue=-0.1,
 				minValue=-2.5,
 				maxValue=2.5,
+			)
+		)
+		self.addParameter(
+			QgsProcessingParameterField(
+				self.AXIS_DZ_FIELD,
+				"Axis elevation offset field dz (meters). If set and valid per feature, overrides default dz.",
+				parentLayerParameterName=self.LINE_LAYER,
+				type=QgsProcessingParameterField.Numeric,
+				optional=True,
 			)
 		)
 		# Axis z override modes (ignore dz when enabled)
@@ -237,9 +277,16 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 		)
 
 		# SVG preview (explicit stations or all stations)
-		self.addParameter(QgsProcessingParameterBoolean(self.SVG_OPEN, "Open SVG after creation", defaultValue=True))
-		self.addParameter(QgsProcessingParameterBoolean(self.SVG_ALL_STATIONS, "SVG: use all stations (max 100 SVGs per run)", defaultValue=False))
-		self.addParameter(QgsProcessingParameterString(self.SVG_STATIONS, "SVG stations to plot (meters, comma-separated; exact match). Overall SVG cap: 100 per run.", defaultValue="", multiLine=False, optional=True))
+		self.addParameter(
+			QgsProcessingParameterField(
+				self.SVG_NAME_FIELD,
+				"SVG filename field — unique value per line feature. Token in Sys_Schnitt_<value>_dz+0_25_s_<station>.svg (dz from AXIS_DZ / AXIS_DZ_FIELD). Pick a field with distinct values per segment; duplicate values overwrite earlier SVGs (warning in log). Falls back to feat_<id> if unset, missing, or empty.",
+				parentLayerParameterName=self.LINE_LAYER,
+				optional=True,
+			)
+		)
+		self.addParameter(QgsProcessingParameterBoolean(self.SVG_ALL_STATIONS, "SVG: use all stations", defaultValue=False))
+		self.addParameter(QgsProcessingParameterString(self.SVG_STATIONS, "SVG stations to plot (meters, comma-separated; exact match). Capped to each line part length [0, L].", defaultValue="", multiLine=False, optional=True))
 		self.addParameter(
 			QgsProcessingParameterNumber(
 				self.SVG_PX_PER_M,
@@ -305,6 +352,7 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 		beta1_rad = math.radians(max(0.0, min(89.999, beta1_deg)))
 		R = float(self.parameterAsDouble(parameters, self.PROFILE_RANGE_M, context))
 		dz_axis = float(self.parameterAsDouble(parameters, self.AXIS_DZ, context))
+		dz_axis_field = self.parameterAsString(parameters, self.AXIS_DZ_FIELD, context) or ""
 		dem_offset = float(self.parameterAsDouble(parameters, self.DEM_OFFSET, context))
 		surf_height = float(self.parameterAsDouble(parameters, self.SURF_HEIGHT, context))
 		surf_top_mode = int(self.parameterAsEnum(parameters, self.SURF_TOP_CROSSFALL_MODE, context))
@@ -317,7 +365,7 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 		surf_xfall_rad = math.radians(_sdeg if not vertical_sides else 89.999)
 		axis_full_cut = bool(self.parameterAsBool(parameters, self.AXIS_FULL_CUT, context))
 		axis_full_fill = bool(self.parameterAsBool(parameters, self.AXIS_FULL_FILL, context))
-		svg_open = bool(self.parameterAsBool(parameters, self.SVG_OPEN, context))
+		svg_name_field = self.parameterAsString(parameters, self.SVG_NAME_FIELD, context) or ""
 		svg_all = bool(self.parameterAsBool(parameters, self.SVG_ALL_STATIONS, context))
 		svg_stations_raw = self.parameterAsString(parameters, self.SVG_STATIONS, context) or ""
 		svg_px_per_m = float(self.parameterAsDouble(parameters, self.SVG_PX_PER_M, context))
@@ -332,8 +380,8 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 
 		# DEM access
 		# We prepare helpers to sample elevation values at arbitrary map points.
-		MAX_SVGS = 100
 		svg_count = 0
+		svg_written_paths = {}
 		dp = dem_layer.dataProvider()
 		nodata = dp.sourceNoDataValue(1) if hasattr(dp, "sourceNoDataValue") else None
 		raster_units_per_pixel_x = getattr(dem_layer.rasterUnitsPerPixelX, "__call__", None)
@@ -486,21 +534,23 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 				except Exception:
 					part_lengths.append(0.0)
 			longest_part_index = max(range(len(parts)), key=lambda i: part_lengths[i]) if parts else 0
+			feature_max_length = max(part_lengths) if part_lengths else 0.0
 			svg_done_for_feature = False
-			matched_stations_for_feature = set()
-			# Plot/file base name: try 'name'/'Name' field; fallback to feature id
+			# Plot/file base name from user-selected field; fallback to feature id
 			_plot_name = None
-			try:
-				_field_names = list(feat.fields().names())
-				_name_field = next((n for n in _field_names if isinstance(n, str) and n.lower() == 'name'), None)
-				if _name_field is not None:
-					_val = feat[_name_field]
+			if svg_name_field and svg_name_field in feat.fields().names():
+				try:
+					_val = feat[svg_name_field]
 					if _val is not None and str(_val).strip():
 						_plot_name = _sanitize_filename_component(_val)
-			except Exception:
-				pass
+				except Exception:
+					pass
 			if not _plot_name:
 				_plot_name = f"feat_{feat.id()}"
+
+			feedback.pushInfo(
+				f"\nProcessing line: {_plot_name} (feature id {feat.id()}, {len(parts)} part(s), max length {feature_max_length:.2f} m)"
+			)
 
 			# width for Feature (W)
 			# If a field is provided, use it; otherwise fall back to the default width.
@@ -514,6 +564,16 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 						W = width_fallback
 			W = max(0.0, W)
 
+			# Per-feature axis dz override from field, else parameter
+			dz_axis_eff = dz_axis
+			if dz_axis_field and dz_axis_field in feat.fields().names():
+				try:
+					_valdz = feat[dz_axis_field]
+					if _valdz is not None:
+						dz_axis_eff = float(_valdz)
+				except Exception:
+					pass
+
 			# Per-feature surface thickness override from field, else parameter
 			surf_height_eff = surf_height
 			if surf_height_field and surf_height_field in feat.fields().names():
@@ -525,6 +585,8 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 							surf_height_eff = sh
 				except Exception:
 					pass
+
+			_dz_token = _format_dz_filename_token(dz_axis_eff)
 
 			for part_idx, part in enumerate(parts):
 				if not part or len(part) < 2:
@@ -553,6 +615,17 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 				if not stations or abs(stations[-1] - length) > 1e-6:
 					stations.append(float(round(length, 6)))
 				stations = sorted(set(stations))
+
+				# SVG station list: only distances within this part length [0, length]
+				part_svg_requests = []
+				if requested_stations:
+					for req in requested_stations:
+						if req >= -1e-9 and req <= length + 1e-6:
+							part_svg_requests.append(req)
+					if part_svg_requests:
+						for req in part_svg_requests:
+							stations.append(float(round(req, 6)))
+						stations = sorted(set(stations))
 
 				# Mid-station for this part (nearest discrete station)
 				# Used to pick a default SVG station when the user did not request specific ones.
@@ -591,7 +664,7 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 					# z0 is the trail surface level at the centerline.
 					z0 = sample_dem(p_center)
 					if z0 is not None:
-						z0 = float(z0) + float(dem_offset) + float(dz_axis)
+						z0 = float(z0) + float(dem_offset) + float(dz_axis_eff)
 					if z0 is None:
 						# Emit minimal points even if DEM sampling fails at axis (debug/visibility)
 						ptA = QgsFeature(pt_fields)
@@ -690,7 +763,7 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 						z_axis_profile = z_dem_at_s(0.0)
 						if z_axis_profile is not None:
 							# z_axis_profile already includes dem_offset; add dz_axis
-							z0 = float(z_axis_profile) + float(dz_axis)
+							z0 = float(z_axis_profile) + float(dz_axis_eff)
 
 					# Intersection finder that tests both up and down slopes from each edge.
 					tanb = math.tan(beta1_rad)
@@ -781,6 +854,19 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 					# Compute intersections and emit points/segments
 					sC_l, zC_l, dir_left = find_first_intersection(s_L, "left")
 					sC_r, zC_r, dir_right = find_first_intersection(s_R, "right")
+
+					if sC_l is None:
+						feedback.pushWarning(
+							f"\nNo cut/fill edge (C) on left at station {station:.2f} m on {_plot_name} "
+							f"(feature id {feat.id()}, part {part_idx + 1}): side slope did not intersect DEM within profile range ±{R:.2f} m. "
+							f"Increase PROFILE_RANGE_M if terrain extends further outward."
+						)
+					if sC_r is None:
+						feedback.pushWarning(
+							f"\nNo cut/fill edge (C) on right at station {station:.2f} m on {_plot_name} "
+							f"(feature id {feat.id()}, part {part_idx + 1}): side slope did not intersect DEM within profile range ±{R:.2f} m. "
+							f"Increase PROFILE_RANGE_M if terrain extends further outward."
+						)
 
 					# Design elevation function using chosen directions for each side
 					def z_design_at_s(sq):
@@ -930,7 +1016,7 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 					right_slope_area = _signed_area(area_cut_down, area_fill_down)
 
 					# Determine if this station is selected for SVG (for svg_sel flag on points)
-					svg_flag = 1 if (svg_all or (requested_stations and any(abs(station - req) <= 1e-6 for req in requested_stations))) else 0
+					svg_flag = 1 if (svg_all or (part_svg_requests and any(abs(station - req) <= 1e-6 for req in part_svg_requests))) else 0
 
 					# Emit points now with proper area fields
 					# Axis center point
@@ -984,30 +1070,20 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 					should_plot = False
 					filename_suffix = None
 					if True:
-						# Tolerance for matching requested stations
-						tol = max(step_m / 2.0, 1e-6)
-						if svg_all and svg_count < MAX_SVGS:
+						if svg_all:
 							should_plot = True
 							filename_suffix = f"s_{int(round(station))}"
-						elif requested_stations and svg_count < MAX_SVGS:
-							for req in requested_stations:
+						elif part_svg_requests:
+							for req in part_svg_requests:
 								if abs(station - req) <= 1e-6:
 									should_plot = True
 									filename_suffix = f"s_{int(round(req))}"
-									matched_stations_for_feature.add(req)
 									break
 						else:
-							# If no requested stations and not all, or cap reached, skip SVG entirely
 							should_plot = False
 
 					if should_plot:
 						try:
-							# Debug: log sign conventions for the plotted station
-							sCl_str = "None" if sC_l is None else f"{sC_l:.3f}"
-							sCr_str = "None" if sC_r is None else f"{sC_r:.3f}"
-							feedback.pushInfo(
-								f"SVG DBG station={station:.2f}: s_L={s_L:.3f}, s_R={s_R:.3f}, sC_l={sCl_str}, sC_r={sCr_str}, dir_left={dir_left}, dir_right={dir_right}"
-							)
 							# Build arrays for plotting
 							# Reuse DEM base breakpoints for plotting (exact piecewise-linear DEM)
 							plot_s = [float(sv) for sv in s_base]
@@ -1016,16 +1092,13 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 							# Create SVG
 							# We show: DEM profile (smoothed for gaps), flat trail between edges,
 							# side slopes to C points, helper dimensions, and labels A/L/R/C.
-							try:
-								import matplotlib
-								matplotlib.use("Agg")
-								from matplotlib import pyplot as plt
-								from matplotlib.ticker import MultipleLocator
-							except ImportError as e:
-								feedback.pushWarning(f"Matplotlib not available - skipping SVG generation. Error: {e}")
+							if not _MPL_AVAILABLE:
+								feedback.pushWarning("Matplotlib not available - skipping SVG generation.")
 								continue
 
-							fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+							fig = Figure(figsize=(8, 5))
+							FigureCanvasAgg(fig)
+							ax = fig.add_subplot(111)
 							# Filter None by simple forward-fill for plotting continuity
 							dem_vals = []
 							last_ok = None
@@ -1127,7 +1200,7 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 										width_base = (s_R - s_L)
 										width_top = max(0.0, (top_R - top_L))
 										area_top = float(round(H * (width_base + width_top) / 2.0, 2))
-									surface_label_text = f"Fahrbahnkörper ($h_{{A}}$={float(round(H, 2)):.2f} m, $A$={area_top:.2f} m²)"
+									surface_label_text = f"Fahrbahnkörper (h_A={float(round(H, 2)):.2f} m, A={area_top:.2f} m²)"
 									surface_poly = ax.fill([s_L, s_R, top_R, top_L], [z0, z0, top_R_y, top_L_y], color="#999999", alpha=0.4, label="_nolegend_", zorder=3)[0]
 								except Exception:
 									pass
@@ -1198,8 +1271,8 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 								if right_mask is not None:
 									mask_cut = right_mask & is_cut if mask_cut is None else (mask_cut | (right_mask & is_cut))
 									mask_fill = right_mask & is_fill if mask_fill is None else (mask_fill | (right_mask & is_fill))
-								label_cut = f"Einschnitt ($A$={area_cut_total:.2f} m²)" if area_cut_total is not None else "Einschnitt"
-								label_fill = f"Auftrag ($A$={area_fill_total:.2f} m²)" if area_fill_total is not None else "Auftrag"
+								label_cut = f"Einschnitt (A={area_cut_total:.2f} m²)" if area_cut_total is not None else "Einschnitt"
+								label_fill = f"Auftrag (A={area_fill_total:.2f} m²)" if area_fill_total is not None else "Auftrag"
 								cut_poly = fill_poly = None
 								if mask_cut is not None and np.any(mask_cut):
 									cut_poly = ax.fill_between(x_np, dem_np, des_np, where=mask_cut, interpolate=True, color="#f4cccc", alpha=0.6, label=label_cut, zorder=1)
@@ -1297,7 +1370,7 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 								_z_dem_at_axis = z_dem_at_s(0.0)
 								if _z_dem_at_axis is not None:
 									_dhA = float(z0) - float(_z_dem_at_axis)
-									if (abs(_dhA) > 1e-9) and (abs(dz_axis) > 1e-9 or axis_full_cut or axis_full_fill):
+									if (abs(_dhA) > 1e-9) and (abs(dz_axis_eff) > 1e-9 or axis_full_cut or axis_full_fill):
 										_y0 = float(min(z0, _z_dem_at_axis))
 										_y1 = float(max(z0, _z_dem_at_axis))
 										ax.plot([0.0, 0.0], [_y0, _y1], color="#ff0000", ls="--", lw=1, zorder=-1)
@@ -1318,7 +1391,6 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 							ax.grid(True, which="major", axis="both", alpha=0.3)
 							# Make axes frame look like grid lines and shrink tick labels slightly
 							try:
-								import matplotlib as mpl
 								grid_color = mpl.rcParams.get("grid.color", "#b0b0b0")
 								grid_alpha = float(mpl.rcParams.get("grid.alpha", 0.3))
 								grid_lw = float(mpl.rcParams.get("grid.linewidth", 0.8))
@@ -1425,14 +1497,16 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 
 							# (Removed in-plot area annotation; areas shown in legend labels only)
 
-							# Save to project directory (force overwrite via atomic replace)
+							# Save to project SECTIONS/ subfolder (force overwrite via atomic replace)
 							proj_file = QgsProject.instance().fileName() or ""
 							proj_dir = os.path.dirname(proj_file) if proj_file else os.getcwd()
+							sections_dir = os.path.join(proj_dir, "SECTIONS")
+							os.makedirs(sections_dir, exist_ok=True)
 							if filename_suffix:
-								out_name = f"section_{_plot_name}_{filename_suffix}.svg"
+								out_name = f"Sys_Schnitt_{_plot_name}{_dz_token}{filename_suffix}.svg"
 							else:
-								out_name = f"section_{_plot_name}.svg"
-							out_path = os.path.join(proj_dir, out_name)
+								out_name = f"Sys_Schnitt_{_plot_name}{_dz_token.rstrip('_')}.svg"
+							out_path = os.path.join(sections_dir, out_name)
 							# Emit transect line feature for the plotted station: from s=-R to s=+R
 							try:
 								xL = p_center.x() + nx * (-R)
@@ -1446,7 +1520,6 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 							except Exception:
 								pass
 
-							fig.tight_layout()
 							# Test: dashed vertical lines at L and R clipped at planum (y from ymin to z0)
 							ymin_axis = ax.get_ylim()[0]
 							ax.vlines(s_L, ymin_axis, z0, colors="#808080", linestyles=":", linewidth=1.2, zorder=1.5, clip_on=False)
@@ -1455,20 +1528,21 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 								ax.vlines(sC_l, ymin_axis, zC_l, colors="#808080", linestyles="-", linewidth=1.2, zorder=1.5, clip_on=False)
 							if sC_r is not None and zC_r is not None:
 								ax.vlines(sC_r, ymin_axis, zC_r, colors="#808080", linestyles="-", linewidth=1.2, zorder=1.5, clip_on=False)
-							fig.tight_layout()
+							prev_svg = svg_written_paths.get(out_path)
+							if prev_svg is not None:
+								feedback.pushWarning(
+									f"\nSVG filename collision: '{out_name}' already written for feature id {prev_svg[0]} ({prev_svg[1]}); "
+									f"overwriting with feature id {feat.id()} ({_plot_name})."
+								)
 							tmp_path = out_path + ".tmp"
 							try:
 								fig.savefig(tmp_path, format="svg", bbox_inches="tight", pad_inches=0.1)
 								os.replace(tmp_path, out_path)
-								# count this SVG (open silently if requested)
+								svg_written_paths[out_path] = (feat.id(), _plot_name)
 								svg_count += 1
+								feedback.pushInfo(f"\nSVG written: {out_name}")
 							finally:
-								plt.close(fig)
-							if svg_open:
-								try:
-									QDesktopServices.openUrl(QUrl.fromLocalFile(out_path))
-								except Exception:
-									pass
+								fig.clear()
 							svg_done_for_feature = True
 						except Exception as _e:
 							feedback.reportError(f"SVG generation failed: {_e}")
@@ -1497,11 +1571,8 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 					chain_c_sink.addFeature(f_cr, QgsFeatureSink.FastInsert)
 
 
-			# If the user requested stations that were not matched, report it
-			if requested_stations:
-				for req in requested_stations:
-					if req not in matched_stations_for_feature:
-						feedback.pushInfo(f"SVG: Station {req} m not found on feature {feat.id()} (no plot).")
+		if svg_count:
+			feedback.pushInfo(f"\nSVG files written: {svg_count}")
 
 		# Basic styling: points size 2px, lines width 0.2, all white; highlight svg stations
 		def _style_point_layer(layer_id):
@@ -1575,7 +1646,7 @@ class GenerateProfilesAndSlopeIntersections(QgsProcessingAlgorithm):
 		# One-paragraph help text shown in the Processing panel.
 		return (
 			"At each station along the input axis, the tool samples a DEM cross-section from s=-R (left) to s=+R (right) around the axis point (use to narrow down to a section of interest, ATTENTION: if R is too large, the tool may run out of memory, if R is too small, no intersection of sideslope with DEM is possible and C points in outputs will be missing!). The axis elevation z0 is taken from DEM plus optional dz, unless overridden by full cut/fill modes. The trail surface is flat between edges (no crossfall). From each trail edge, a side slope with angle beta_1 to horizontal is extended outward (up or down is chosen to hit the DEM first). Intersections define C points and the horizontal distance slope_run.\n"
-			"Parameters: STEP_M (station spacing, m); WIDTH_FIELD or WIDTH_FALLBACK (trail width, m); PROFILE_RANGE_M R (m) for sampling extent; BETA1_DEG (deg) controls side slope tan(beta_1)=rise/run; DEM_OFFSET (m) shifts DEM vertically; AXIS_DZ (m) adjusts z0 as DEM+dz (ignored if full cut/fill); AXIS_FULL_CUT/FILL set z0 to min/max DEM at edges; SURF_* parameters only affect SVG visualization (trapezoid body h_A, side angle to horizontal, optional top crossfall q). SVG options allow plotting only selected stations with 1:1 scale. 'SVG: use all stations' will export all stations but is capped to a maximum of 100 SVGs per run.\n"
+			"Parameters: STEP_M (station spacing, m); WIDTH_FIELD or WIDTH_FALLBACK (trail width, m); PROFILE_RANGE_M R (m) for sampling extent; BETA1_DEG (deg) controls side slope tan(beta_1)=rise/run; DEM_OFFSET (m) shifts DEM vertically; AXIS_DZ or AXIS_DZ_FIELD (m) adjusts z0 as DEM+dz (ignored if full cut/fill); AXIS_FULL_CUT/FILL set z0 to min/max DEM at edges; SURF_* parameters only affect SVG visualization (trapezoid body h_A, side angle to horizontal, optional top crossfall q). SVG_NAME_FIELD selects the per-feature token for Sys_Schnitt_<token>_dz±X_Y_s_<station>.svg files under SECTIONS/; effective dz per feature is included in the filename (e.g. _dz-0_75_, _dz+0_25_). 'SVG: use all stations' exports an SVG at every STEP_M station.\n"
 			"Outputs: points (axis center, edges, C points) with attributes including cut/fill kind, slope_run, z, z_base, z_diff, per-interval signed areas (area_cut>0, area_fill<0). Lines: BC segments per side; chains for C (left/right) and trail edges."
 		)
 

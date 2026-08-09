@@ -1,0 +1,17 @@
+---
+description: "Schrittweise Änderungen statt großer Refactorings"
+globs: ["**/*.{sh,bat,py,js,css,html}"]
+alwaysApply: true
+---
+
+# Inkrementelle Entwicklung
+
+## Meine Arbeitsweise
+- Ich liefere Änderungen in kleinen, testbaren Einheiten
+- Maximal eine logische Einheit pro Antwort
+- Keine Anfragen wie "refaktoriere alle 10 Dateien" umsetzen
+
+## Workflow-Unterstützung
+- Bei großen Aufgaben: Selbstständig in Teil-Schritte unterteilen vorschlagen
+- Nach jeder Änderung: Auf Testbarkeit hinweisen
+- Wenn Änderung zu groß: Alternativvorschläge für kleinere Units anbieten

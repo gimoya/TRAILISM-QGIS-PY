@@ -1,0 +1,28 @@
+---
+description: "QGIS/OSGeo4W Python only — pip installs und Abhängigkeiten"
+alwaysApply: true
+---
+
+# OSGeo4W / QGIS Python
+
+Dieses Repo enthält **QGIS Processing**-Skripte. Laufzeit ist die **mit QGIS gelieferte Python-Umgebung** (OSGeo4W), nicht eine beliebige System-/User-Python-Installation.
+
+## Pflicht: Pakete nur über OSGeo4W-Python installieren
+
+- **Immer** den vollen Interpreter-Pfad verwenden (Version anpassen, z. B. `Python312`):
+
+  `"C:\OSGeo4W\apps\Python312\python.exe" -m pip install <paket>`
+
+- **Nicht** blind `pip`, `python -m pip` oder Cursor-Terminal-Pip ausführen, ohne zu wissen, welcher `python` aufgerufen wird.
+
+- **`pip install --user` vermeiden** für NumPy/SciPy/PyGIS-relevante Pakete — das landet oft unter `%APPDATA%\Python\Python312\site-packages` und **überlagert** OSGeo4W → typische Fehler: NumPy 2.x vs. gegen NumPy 1.x gebaute Wheels.
+
+## Wenn der Nutzer Abhängigkeiten braucht
+
+- Installationsbefehle **nur** mit `...\OSGeo4W\apps\Python3xx\python.exe -m pip ...` formulieren.
+- Bei Konflikten: zuerst prüfen, ob Imports aus **`...\OSGeo4W\apps\Python3xx\Lib\site-packages`** kommen (`import numpy; print(numpy.__file__)`), nicht aus **Roaming**.
+- NumPy/SciPy: zusammenpassende Versionen (z. B. NumPy 1.26.x + passende SciPy-Wheels für dieselbe Python-Version); **kein** Mischen von Roaming-NumPy 2 mit OSGeo4W-Binaries ohne explizite Abstimmung.
+
+## Cursor / IDE
+
+- Projektinterpreter auf **`C:\OSGeo4W\apps\Python312\python.exe`** (oder aktuelle OSGeo4W-Version) setzen, damit Terminal und Checks dieselbe Basis nutzen — **QGIS-Prozess** trotzdem separat neu starten nach Installationen.

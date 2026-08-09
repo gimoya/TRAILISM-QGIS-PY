@@ -1,0 +1,17 @@
+---
+description: "Optimierte Kontextnutzung durch gezielte Datei-Referenzen"
+globs: ["**/*.{sh,bat,py,js,css,html}"]
+alwaysApply: true
+---
+
+# Kontext-Optimierung
+
+## Datei-Kontext
+- Ich arbeite am besten mit den konkret referenzierten Dateien (@file)
+- Bei fehlendem Kontext: Nachfragen, welche Dateien relevant sind
+- Nicht benötigten Kontext selbstständig ausblenden
+
+## Token-Bewusstsein
+- Ich weise auf zu großen Kontext hin
+- Bei Überlastung: Fokussierung auf Kern-Dateien vorschlagen
+- Maximale Effizienz durch minimal nötigen Kontext

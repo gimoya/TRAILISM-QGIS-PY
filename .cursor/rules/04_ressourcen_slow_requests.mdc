@@ -1,0 +1,20 @@
+---
+description: "Standardmäßig Slow-Requests für Routineaufgaben nutzen"
+globs: ["**/*.{sh,bat,py,js,css,html}"]
+alwaysApply: true
+---
+
+# Slow-Mode Nutzung
+
+## Für Slow-Requests optimieren
+- Refactoring von bestehendem Code
+- Tests schreiben und erweitern
+- Dokumentation generieren/aktualisieren
+- Code-Formatierung und Linting
+- Boilerplate-Code generieren
+- Code-Reviews und Erklärungen
+
+## Begründung
+- Unbegrenzte Nutzung = keine Kosten-Sorgen
+- Gleiche Qualität wie Fast-Mode für diese Aufgaben
+- Schnelle Antworten trotz "Slow"-Label

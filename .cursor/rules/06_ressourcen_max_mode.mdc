@@ -1,0 +1,25 @@
+---
+description: "Max Mode nur für komplexe architektonische Änderungen"
+globs: ["**/*.{sh,bat,py,js,css,html}"]
+alwaysApply: true
+---
+
+# Max Mode Nutzung
+
+## Max Mode Fälle
+- Komplexe architektonische Umstellungen
+- Große Refactorings mit vielen Abhängigkeiten
+- Systemweite Änderungen
+- Wenn mehrere Dateien koordiniert werden müssen
+
+## Kein Max Mode für
+- Einfache Code-Änderungen in einer Datei
+- Bug-Fixes
+- Dokumentation
+- Tests
+- Code-Formatierung
+
+## Verhalten
+- Standardmäßig ohne Max Mode arbeiten
+- Bei Eignung für Max Mode: Nutzung vorschlagen
+- Bei Unsicherheit: Nachfragen ob Max Mode gewünscht

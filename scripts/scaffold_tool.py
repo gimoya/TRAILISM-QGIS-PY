@@ -312,31 +312,16 @@ def update_mkdocs_nav(mkdocs_path: str, title: str, slug: str) -> None:
     write_text(mkdocs_path, "\n".join(out_lines) + "\n")
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Scaffold a new tool's docs")
-    ap.add_argument("--file", required=True, help="Path to the new tool .py script")
-    ap.add_argument("--title", default=None, help="Display title (defaults to displayName() or filename)")
-    ap.add_argument("--slug", default=None, help="Docs page slug (defaults from title)")
-    ap.add_argument("--validate", action="store_true", help="Run mkdocs build --strict after generation")
-    args = ap.parse_args()
-
-    script_path = os.path.normpath(args.file)
-    if not os.path.isfile(script_path):
-        print(f"ERROR: File not found: {script_path}", file=sys.stderr)
-        return 2
-
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+def _scaffold_for_file(script_path: str, repo_root: str, title: Optional[str], slug_arg: Optional[str]) -> None:
+    """Generate/overwrite sidecar .md, docs/tools/<slug>.md, and update mkdocs nav for one tool."""
     py_src = read_text(script_path)
-
-    # Derive properties
-    display_name = args.title or infer_display_name(py_src) or os.path.splitext(os.path.basename(script_path))[0]
+    display_name = title or infer_display_name(py_src) or os.path.splitext(os.path.basename(script_path))[0]
     alg_id = infer_algorithm_id(py_src)
     short_help = infer_short_help(py_src)
     params = infer_parameters(py_src)
     inputs, outputs = infer_io(py_src)
-    slug = args.slug or derive_slug(display_name)
+    slug = slug_arg or derive_slug(display_name)
 
-    # Sidecar path (next to .py)
     base_name = os.path.splitext(os.path.basename(script_path))[0]
     sidecar_name = base_name + ".md"
     sidecar_path = os.path.join(os.path.dirname(script_path), sidecar_name)
@@ -346,7 +331,6 @@ def main() -> int:
     sidecar_md = make_sidecar_content(display_name, alg_id, short_help, inputs, outputs, params)
     write_text(sidecar_path, sidecar_md)
 
-    # Docs page
     docs_page_dir = os.path.join(repo_root, "docs", "tools")
     docs_page_path = os.path.join(docs_page_dir, f"{slug}.md")
     if os.path.exists(docs_page_path):
@@ -355,15 +339,76 @@ def main() -> int:
     docs_page = f"# {display_name}\n\n--8<-- \"{include_rel}\"\n\n"
     write_text(docs_page_path, docs_page)
 
-    # mkdocs nav
     mkdocs_path = os.path.join(repo_root, "mkdocs.yml")
     update_mkdocs_nav(mkdocs_path, display_name, slug)
 
-    # README tools list (from all .py + same-named .md in repo root)
-    update_readme_tools_list(repo_root)
-
     print(f"Created sidecar: {os.path.relpath(sidecar_path, repo_root)}")
     print(f"Created docs page: {os.path.relpath(docs_page_path, repo_root)}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Scaffold TRAILISM tool docs and refresh README/mkdocs")
+    ap.add_argument(
+        "--file",
+        help="Path to a single tool .py script (single-tool mode). If omitted, use --all to process all TRAILISM__*.py",
+    )
+    ap.add_argument(
+        "--all",
+        action="store_true",
+        help="Scan repo root for all TRAILISM__*.py and scaffold sidecars/docs for each",
+    )
+    ap.add_argument("--title", default=None, help="Display title (only used with --file; defaults to displayName() or filename)")
+    ap.add_argument("--slug", default=None, help="Docs page slug (only used with --file; defaults from title)")
+    ap.add_argument("--validate", action="store_true", help="Run mkdocs build --strict after generation")
+    args = ap.parse_args()
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+
+    if args.all:
+        # Bulk mode: find all TRAILISM__*.py in repo root and scaffold each one
+        py_files: List[str] = []
+        for name in sorted(os.listdir(repo_root)):
+            if not name.startswith("TRAILISM__") or not name.endswith(".py"):
+                continue
+            py_path = os.path.join(repo_root, name)
+            if os.path.isfile(py_path):
+                py_files.append(py_path)
+        if not py_files:
+            print("No TRAILISM__*.py scripts found in repo root.", file=sys.stderr)
+            return 0
+
+        print(f"Scaffolding {len(py_files)} tools from TRAILISM__*.py in {repo_root}...")
+        for script_path in py_files:
+            _scaffold_for_file(script_path, repo_root, None, None)
+
+        # After all files, refresh README tools list once from all discovered py+md pairs.
+        update_readme_tools_list(repo_root)
+        print("Updated mkdocs.yml nav")
+        print("Updated README.md tools list")
+
+        if args.validate:
+            try:
+                subprocess.check_call([sys.executable, "-m", "mkdocs", "build", "--strict"], cwd=repo_root)
+                print("MkDocs build OK")
+            except Exception as e:
+                print(f"MkDocs build failed: {e}", file=sys.stderr)
+                return 3
+        return 0
+
+    # Single-file mode (backwards-compatible)
+    if not args.file:
+        print("ERROR: Either --file or --all must be specified.", file=sys.stderr)
+        return 2
+
+    script_path = os.path.normpath(args.file)
+    if not os.path.isfile(script_path):
+        print(f"ERROR: File not found: {script_path}", file=sys.stderr)
+        return 2
+
+    _scaffold_for_file(script_path, repo_root, args.title, args.slug)
+
+    # README tools list (from all .py + same-named .md in repo root)
+    update_readme_tools_list(repo_root)
     print("Updated mkdocs.yml nav")
     print("Updated README.md tools list")
 

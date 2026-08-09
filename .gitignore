@@ -54,3 +54,8 @@ env/
 .DS_Store
 Thumbs.db
 
+nul
+NUL
+
+# Never leave ad-hoc scripts in Processing SCRIPTS_FOLDERS (= repo root)
+_tmp*.py

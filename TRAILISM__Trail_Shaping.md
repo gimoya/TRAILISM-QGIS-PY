@@ -21,6 +21,7 @@
 - **Shape table lengths (comma-separated, meters) - flat portion between sigmoid start and end. Use period (.) for decimals** (String)
 - **Sigmoid transition lengths (comma-separated, meters) - length of sigmoid curve at start and end of each shape. Must match number of shape distances. Use period (.) for decimals** (String)
 - **Shape arc radius factor. In-run ramp uses a circular arc. L = in-run length; R = max(factor × L, L). 1 = quarter circle (sharpest), >1 = gentler arc. Min: 1.0. Default: 1.0.** (Number)
+- **Ribbon locations GeoJSON output file (optional)** (FileDestination)
 - **Export format** (Enum)
 
 ### Parameters
@@ -41,6 +42,7 @@
 - **Shape table lengths (comma-separated, meters) - flat portion between sigmoid start and end. Use period (.) for decimals** (String, default '')
 - **Sigmoid transition lengths (comma-separated, meters) - length of sigmoid curve at start and end of each shape. Must match number of shape distances. Use period (.) for decimals** (String, default '')
 - **Shape arc radius factor. In-run ramp uses a circular arc. L = in-run length; R = max(factor × L, L). 1 = quarter circle (sharpest), >1 = gentler arc. Min: 1.0. Default: 1.0.** (Number, default 1.0)
+- **Ribbon locations GeoJSON output file (optional)** (FileDestination)
 - **Export format** (Enum, default 1  # GLB by default)
 
 ### Usage
@@ -65,6 +67,7 @@ processing.run('add_trail_shapes', {
     'SHAPE_TABLE_LENGTHS': ...,
     'SIGMOID_LENGTHS': ...,
     'SHAPE_ARC_RADIUS_FACTOR': ...,
+    'OUTPUT_GEOJSON': ...,
     'EXPORT_FORMAT': ...,
     'OUTPUT': 'memory:'
 })
