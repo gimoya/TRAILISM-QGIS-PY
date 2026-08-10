@@ -1,6 +1,6 @@
 ## TRAILISM: Grade Corridor Chords
 
-TRAILISM ALGORITHM:\n\nExact-grade downhill path from map-click start to map-click end inside a corridor.\n\nMethod:\n- Local aspect/slope from DEM sampled at cruise chord length (ignores micro relief between).\n- Grade from chord start/end DEM only: (z_a - z_b) / |ab| = target.\n- Grow on one grade diagonal (L or R) until the next step exits the corridor; clip to polygon edge.\n- Try side switch; if the switch chord is outside, backtrack one node and retry. If backtrack reaches the origin, try the other opening side.\n\nStart/end → corridor CRS; output in corridor CRS. Metres CRS required.
+TRAILISM ALGORITHM:\n\nWalk downhill inside a corridor:\n1. Full circle at chord length → steepest-down orientation (ties → angular mid).\n2. UI L/R semicircle (0…180°) → closest |grade − target|.\n3. Ray inside → next node; ray exits → edge intersection, flip side, continue.\n4. Two consecutive short chords / no candidate → drop tip, rewind, opposite exit side (once per node/side).\n5. End when within UI buffer of end point, or rewind exhausts back at start.\n\nOutput: node points + all try paths as LineStrings + debug fall-line ray and 180° pick fan (best path).
 
 ### Algorithm id
 `grade_corridor_chords`
@@ -10,28 +10,28 @@ TRAILISM ALGORITHM:\n\nExact-grade downhill path from map-click start to map-cli
 - **Corridor polygon** (FeatureSource)
 - **Start point (click on map)** (Point)
 - **End point (click on map)** (Point)
-- **Target grade (%)** (Number)
-- **Cruise chord length (m)** (Number)
-- **Minimum chord length (m)** (Number)
-- **Maximum steps per attempt** (Number)
-- **Output all candidate graph branches** (Boolean)
+- **End reach buffer (m)** (Number)
+- **Chord length (m)** (Number)
+- **Side of steepest-down orientation** (Enum)
+- **Desired grade (%)** (Number)
 
 ### Parameters
 - **DEM raster** (RasterLayer)
 - **Corridor polygon** (FeatureSource)
 - **Start point (click on map)** (Point)
 - **End point (click on map)** (Point)
-- **Target grade (%)** (Number, default 8.0)
-- **Cruise chord length (m)** (Number, default 30.0)
-- **Minimum chord length (m)** (Number, default 2.0)
-- **Maximum steps per attempt** (Number, default 2000)
-- **Output all candidate graph branches** (Boolean, default False)
-- **Output path** (FeatureSink)
-- **Graph branches (one LineString per branch)** (FeatureSink)
+- **End reach buffer (m)** (Number, default 5.0)
+- **Chord length (m)** (Number, default 30.0)
+- **Side of steepest-down orientation** (Enum)
+- **Desired grade (%)** (Number, default 8.0)
+- **Nodes** (FeatureSink)
+- **Path tries (all LineStrings)** (FeatureSink)
+- **Debug: fall-line + 180° pick fan** (FeatureSink)
 
 ### Outputs
-- **Output path**
-- **Graph branches (one LineString per branch)**
+- **Nodes**
+- **Path tries (all LineStrings)**
+- **Debug: fall-line + 180° pick fan**
 
 ### Usage
 - Python:
@@ -42,13 +42,13 @@ processing.run('grade_corridor_chords', {
     'CORRIDOR': ...,
     'START': ...,
     'END': ...,
-    'GRADE_PCT': ...,
+    'END_BUFFER': ...,
     'STEP_LENGTH': ...,
-    'MIN_CHORD_LENGTH': ...,
-    'MAX_STEPS': ...,
-    'KEEP_GRAPH_BRANCHES': ...,
+    'SIDE': ...,
+    'GRADE_PCT': ...,
     'OUTPUT': ...,
-    'GRAPH_OUTPUT': ...,
+    'LINE_OUTPUT': ...,
+    'FALLLINE_OUTPUT': ...,
     'OUTPUT': 'memory:'
 })
 ```
