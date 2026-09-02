@@ -37,24 +37,30 @@ import struct
 import base64
 from pathlib import Path
 
-# Curve detection: a segment counts as a curve only if BOTH (1) total turn >= CURVE_MIN_ANGLE_DEG and (2) mean curvature >= CURVE_MIN_CURVATURE_RAD_PER_M (i.e. effective radius <= CURVE_R_MAX_M).
-#
-# How changing each parameter affects which segments get banked:
-#   CURVE_R_MAX_M (m): Max effective radius that still counts as a curve. Raise it → gentler bends count as curves (more banking). Lower it → only tighter bends are banked.
-#   CURVE_MIN_CURVATURE_RAD_PER_M (rad/m): Derived as 1/CURVE_R_MAX_M. Min mean curvature required. Raise it (e.g. by lowering R_max) → fewer segments pass; only sharper curves banked.
-#   CURVE_MIN_ANGLE_DEG (°): Min total turn in one direction. Raise it → need more turn to count as curve (fewer curves). Lower it → less turn required (more segments banked).
-CURVE_R_MAX_M = 12.0
-CURVE_MIN_CURVATURE_RAD_PER_M = 1.0 / CURVE_R_MAX_M
-CURVE_MIN_ANGLE_DEG = 10.0
+# Curve detection: segment banks only if BOTH (1) effective radius ≤ R_max and
+# (2) arc length along centerline (first→last turning vertex) ≥ min arc length.
+CURVE_R_MAX_DEFAULT_M = 10
+CURVE_MIN_ARC_LENGTH_DEFAULT_M = 5
 
-# Simple shapes calculation logic: height * X (in meters) = table length = sigmoid length 
-SHAPE_TABLE_SIGMOID_FACTOR = 3
+# Banking envelope: rise on curve from first curve vertex; fall extends past curve end.
+# Transition lengths (BANKING_*_LENGTH_M) are measured on the inner ribbon edge; centerline
+# span is scaled by R/(R-w) per curve segment so tight turns do not steepen the sigmoid.
+BANKING_RISE_LENGTH_M = 2.5
+BANKING_FALL_EXTENSION_M = 2
+BANKING_SIGMOID_K = 5.0
+BANKING_MESH_STEP_M = 0.25   # densify step when banking active (sigmoid needs >2 samples per transition)
+BANKING_SHORT_CURVE_LENGTH_M = 6.0
+BANKING_SHORT_CURVE_HEIGHT_FACTOR = 0.75
 
 # Tread fade at ends: raise ramps 0->1 over first N vertices and 1->0 over last N; end caps are skipped
 TREAD_FADE_VERTICES = 5
 
 # Shape ramps: in-run = circular arc (tangent to level tread); out-run = sigmoid with fixed steepness.
 SHAPE_OUTRUN_SIGMOID_K = 4.5  # hardcoded steepness for shape out-run (fall) only
+SHAPE_DEFAULT_HEIGHT_M = 0.5
+SHAPE_DEFAULT_TABLE_LENGTH_M = 0.0
+SHAPE_DEFAULT_SIGMOID_LENGTH_M = 2.5
+SHAPE_DEFAULT_ARC_RADIUS_FACTOR = 1.0
 
 # Texture UV: world-space scale (meters per texture tile); 1.0 = one tile per meter along/across
 TEXTURE_SCALE_M = 1.0
@@ -70,6 +76,8 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
     SELECTED_FEATURES_ONLY = 'SELECTED_FEATURES_ONLY'
     Z_RAISE_PARAM = 'Z_RAISE'
     OUTER_EDGE_RAISE = 'OUTER_EDGE_RAISE'
+    CURVE_R_MAX = 'CURVE_R_MAX'
+    CURVE_MIN_ARC_LENGTH = 'CURVE_MIN_ARC_LENGTH'
     TRANSVERSAL_CONCAVITY = 'TRANSVERSAL_CONCAVITY'
     BACK_SLOPE_ANGLE_DEG = 'BACK_SLOPE_ANGLE_DEG'
     TREAD_BEVEL_SIZE = 'TREAD_BEVEL_SIZE'
@@ -82,7 +90,6 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
     SHAPE_TABLE_LENGTHS = 'SHAPE_TABLE_LENGTHS'
     SIGMOID_LENGTHS = 'SIGMOID_LENGTHS'
     SHAPE_ARC_RADIUS_FACTOR = 'SHAPE_ARC_RADIUS_FACTOR'
-    SIMPLE_SHAPES = 'SIMPLE_SHAPES'
     OUTPUT_GEOJSON = 'OUTPUT_GEOJSON'
 
     def tr(self, string):
@@ -113,26 +120,23 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
             'Builds a 3D ribbon mesh from a trail centerline: drapes Z from the DEM, optionally raises the outer edge in curves (banking), and can add shape bumps (arc in-run, sigmoid out-run) along the trail. Exports to GLTF/GLB. The input layer is not modified.\n\n'
             'Curve detection and banking:\n'
             '- The line is densified to 0.5 m spacing along the axis (all vertices at 0.5 m).\n'
-            '- Curves are detected by segment-based logic: contiguous vertices with turning in one direction (left or right) form a segment. A segment counts as a curve only if (1) total turn is at least 30°, and (2) mean curvature is at least 1/R_max (effective radius ≤ 10 m). Gentle long arcs (radius > 10 m) are not banked.\n'
-            '- For each detected curve, a banking envelope is applied: the outer edge is raised by "Outer edge raise" (vertex-based rise/plateau/fall). At curve-to-curve transitions without a straight, banking is per-side: the outgoing curve fades on its side while the incoming curve rises on the opposite side (both sides raised in the transition).\n'
+            '- Curves are detected by segment-based logic: contiguous same-direction turning vertices. A segment is banked only if (1) effective radius ≤ R_max and (2) arc length along the centerline (first to last turning vertex) ≥ min arc length.\n'
+            '- For each detected curve, banking rises from the first curve vertex (sigmoid on-curve), plateaus through the bend, then falls over 1 m past the last curve vertex.\n'
             '- Transversal concavity (optional) adds a shallow concave cross-section in banked sections to mimic a tread shape.\n\n'
             'Parameters:\n'
             '- DEM layer: Required raster for sampling base elevation (Z).\n'
             '- Trail raise height: Height above terrain (m). Default: 0.5, minimum: 0.1. Use period (.) for decimals.\n'
             '- Selected features only: If checked, process only selected line features.\n'
             '- Outer edge raise: Banking height on the outer edge of curves (m). Default: 1.0, minimum: 0.0.\n'
+            '- Max curve radius (R_max): Bank only bends with effective radius ≤ R_max (m). Larger R_max = gentler bends qualify.\n'
+            '- Min curve arc length: Bank only if the turning arc along the centerline is at least this long (m). Filters short kinks.\n'
             '- Transversal concavity: Depth of cross-sectional concavity in curves (m). Default: 0.3, range 0–1. Use period (.) for decimals.\n'
             '- Back slope angle: Angle of the ribbon sidewall/back from horizontal (degrees). Default: 45. Higher = steeper, lower = flatter. Range: 15–90.\n'
             '- Tread edge bevel: Chamfer size (m) for the left and right tread edges. 0 = no bevel. Use period (.) for decimal.\n'
             '- Ribbon width: Width of exported mesh (m). Default: 2.0, minimum: 0.5. Optional attribute field overrides per feature.\n'
             '- Texture file: Optional image (PNG/JPG) for the ribbon surface.\n'
-            '- Simple shapes mode: If checked, only shape distances and heights are needed; table and sigmoid lengths are derived (table length = sigmoid length = height × factor; factor = SHAPE_TABLE_SIGMOID_FACTOR at top of script, default 2; min height 0.25 m).\n'
-            '- Shape distances: Comma-separated distances from start (m). Use "end" for line end, "0" for start. Period (.) for decimals. Distances exceeding the linestring length are ignored (no error; that shape has no effect).\n'
-            '- Shape heights: Comma-separated heights (m), one per distance, or a single value (replicated for all distances). Minimum: 0.25 m in simple mode.\n'
-            '- Shape table lengths / Sigmoid transition lengths: Required only when Simple shapes mode is unchecked. Each list must match the number of shape distances, or you can give a single value (replicated for all distances).\n'
-            '- Single-value replication: For heights (simple mode) and for heights, table lengths, and sigmoid lengths (advanced mode), you can enter one value instead of a list; it is automatically repeated to match the number of shape distances.\n'
-            '- Shape ramps: In-run (rise into each shape) always uses a circular arc tangent to the level tread; out-run (fall) always uses a fixed sigmoid (steepness not exposed).\n'
-            '- Shape arc radius factor: Controls the curvature of the in-run arc. L = in-run length (sigmoid length). Arc radius R = max(factor × L, L). Factor = 1 gives a quarter circle (sharpest rise); factor > 1 gives a gentler arc over the same length. Minimum 1.0. Default: 1.0. Use period (.) for decimal.\n'
+            '- Shape distances: Reference list (one per shape). Comma-separated metres from trail start. Keywords: "0" = start, "end" = line end (last item only). Not replicated.\n'
+            '- Shape heights / table lengths / sigmoid lengths / arc factors: One value replicates to every shape; otherwise one per distance. Empty uses defaults: height 0.5 m, table 0 m, sigmoid 2.0 m, arc 1.0. Heights ≥0. Table ≥0 (0 = no plateau). Sigmoid >0. Arc: 0 = sigmoid in-run, ≥1 = circular arc (1 = quarter circle, >1 = gentler).\n'
             '- Export format: GLTF or GLB.\n\n'
             'Output:\n'
             '- Ribbon meshes written to the project home directory (or script directory if no project path). Filename from feature "name" field or FID. Meshes are in local coordinates (origin at mesh centroid) for use with Qgis2threejs.\n'
@@ -167,17 +171,17 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterNumber(
                 self.Z_RAISE_PARAM,
-                'Trail raise height (meters). Default: 0.5, minimum: 0.1. Use period (.) for decimal separator',
+                'Trail raise height (m). Range: ≥0.5. Base tread offset above smoothed DEM (before shapes/banking). Fades to 0 at trail ends.',
                 type=QgsProcessingParameterNumber.Double,
                 defaultValue=0.5,
-                minValue=0.1
+                minValue=0.5
             )
         )
 
         self.addParameter(
             QgsProcessingParameterNumber(
                 self.OUTER_EDGE_RAISE,
-                'Outer edge raise (meters). Default: 1, minimum: 0.0. Use period (.) for decimal separator',
+                'Outer edge raise (m). Range: ≥0. Banking height on outer berm in curves; 0 = off. Short curves use reduced peak.',
                 type=QgsProcessingParameterNumber.Double,
                 defaultValue=1,
                 minValue=0.0,
@@ -187,8 +191,28 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
 
         self.addParameter(
             QgsProcessingParameterNumber(
+                self.CURVE_R_MAX,
+                'Max curve radius R_max (m). Range: >0. Bank only if effective radius ≤ R_max; gentler bends (larger R) are skipped.',
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=CURVE_R_MAX_DEFAULT_M,
+                minValue=0.1,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.CURVE_MIN_ARC_LENGTH,
+                'Min curve arc length (m). Range: ≥0. Bank only if turning arc along centerline (first→last curve vertex) is at least this long.',
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=CURVE_MIN_ARC_LENGTH_DEFAULT_M,
+                minValue=0.0,
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
                 self.TRANSVERSAL_CONCAVITY,
-                'Transversal concavity depth (meters). Default: 0.15, positive = concave. Range: 0.0 to 1.0. Use period (.) for decimal separator',
+                'Transversal concavity (m). Range: 0–1. Cross-section dish depth in banked curves; 0 = flat tread.',
                 type=QgsProcessingParameterNumber.Double,
                 defaultValue=0.15,
                 minValue=0.0,
@@ -200,7 +224,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterNumber(
                 self.BACK_SLOPE_ANGLE_DEG,
-                'Back slope angle (degrees). Angle of ribbon sidewall from horizontal. Default: 45. Higher = steeper, lower = flatter. Range: 15–90. Use period (.) for decimal.',
+                'Back slope angle (°). Range: 15–90. Sidewall angle from horizontal; higher = steeper cut into slope.',
                 type=QgsProcessingParameterNumber.Double,
                 defaultValue=45.0,
                 minValue=15.0,
@@ -212,9 +236,9 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterNumber(
                 self.TREAD_BEVEL_SIZE,
-                'Tread edge bevel size (m). Chamfers the left and right top edges. 0 = no bevel. Use period (.) for decimal.',
+                'Tread edge bevel (m). Range: ≥0. Chamfer on left/right tread edges; 0 = sharp edge.',
                 type=QgsProcessingParameterNumber.Double,
-                defaultValue=0.0,
+                defaultValue=0.02,
                 minValue=0.0,
                 optional=True
             )
@@ -223,7 +247,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterNumber(
                 self.RIBBON_WIDTH,
-                'Ribbon width (meters). Default: 2.0, minimum: 0.5. Used when no field is set. Use period (.) for decimal separator',
+                'Ribbon width (m). Range: ≥0.5. Trail width when no attribute field is set; field overrides per feature.',
                 type=QgsProcessingParameterNumber.Double,
                 defaultValue=2,
                 minValue=0.5,
@@ -234,7 +258,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterField(
                 self.RIBBON_WIDTH_FIELD,
-                'Ribbon width from attribute (optional)',
+                'Ribbon width from attribute (optional). Numeric field overrides ribbon width per feature (min 0.5 m).',
                 parentLayerParameterName=self.INPUT,
                 type=QgsProcessingParameterField.Numeric,
                 optional=True
@@ -251,17 +275,9 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         )
 
         self.addParameter(
-            QgsProcessingParameterBoolean(
-                self.SIMPLE_SHAPES,
-                'Simple shapes mode (auto-calculate table and sigmoid lengths from heights)',
-                defaultValue=False
-            )
-        )
-
-        self.addParameter(
             QgsProcessingParameterString(
                 self.SHAPE_DISTANCES,
-                'Shape distances from start (comma-separated, meters). Use period (.) for decimals. Use "end" for line end',
+                'Shape distances (comma-separated, m). One per shape — reference list, not replicated. Use "0" for start, "end" for line end (last item). Period (.) for decimals.',
                 defaultValue='',
                 optional=True
             )
@@ -270,7 +286,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterString(
                 self.SHAPE_HEIGHTS,
-                'Shape heights (comma-separated, meters). Use period (.) for decimals. Minimum: 0.25',
+                'Shape heights (comma-separated, m). Range: ≥0. Empty = 0.5 m for all. One value replicates; else one per distance.',
                 defaultValue='',
                 optional=True
             )
@@ -279,7 +295,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterString(
                 self.SHAPE_TABLE_LENGTHS,
-                'Shape table lengths (comma-separated, meters) - flat portion between sigmoid start and end. Use period (.) for decimals',
+                'Shape table lengths (comma-separated, m). Range: ≥0. Empty = 0 m for all. One value replicates; else one per distance.',
                 defaultValue='',
                 optional=True
             )
@@ -288,19 +304,17 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterString(
                 self.SIGMOID_LENGTHS,
-                'Sigmoid transition lengths (comma-separated, meters) - length of sigmoid curve at start and end of each shape. Must match number of shape distances. Use period (.) for decimals',
+                'Sigmoid lengths (comma-separated, m). Range: >0. Empty = 2.0 m for all. Out-run fall; in-run when arc = 0. One value replicates; else one per distance.',
                 defaultValue='',
                 optional=True
             )
         )
 
         self.addParameter(
-            QgsProcessingParameterNumber(
+            QgsProcessingParameterString(
                 self.SHAPE_ARC_RADIUS_FACTOR,
-                'Shape arc radius factor. In-run ramp uses a circular arc. L = in-run length; R = max(factor × L, L). 1 = quarter circle (sharpest), >1 = gentler arc. Min: 1.0. Default: 1.0.',
-                type=QgsProcessingParameterNumber.Double,
-                defaultValue=1.0,
-                minValue=1.0,
+                'Arc radius factors (comma-separated). 0 = sigmoid in-run; ≥1 = arc (1 = quarter circle, >1 = gentler). Empty = 1.0 for all. One value replicates; else one per distance.',
+                defaultValue='',
                 optional=True
             )
         )
@@ -334,6 +348,50 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                     pass
         return max(0.5, float(default_width))
 
+    @staticmethod
+    def _parse_comma_list(value_str):
+        items = []
+        for item in (value_str or '').split(','):
+            item = item.strip()
+            if item:
+                items.append(item)
+        return items
+
+    @staticmethod
+    def _parse_shape_replicated_values(
+        value_str, n_dist, param_name, required=True, empty_default=None, transform=None
+    ):
+        """
+        Parse a comma-separated shape parameter and replicate a single value to match SHAPE_DISTANCES count.
+        """
+        parsed = AddCurveBankingToLineAlgorithm._parse_comma_list(value_str)
+        if not parsed:
+            if empty_default is not None:
+                return [empty_default] * n_dist
+            if required:
+                raise ValueError(f"{param_name} cannot be empty when SHAPE_DISTANCES is set.")
+            return []
+        values = [transform(x) if transform else float(x) for x in parsed]
+        if len(values) == 1 and n_dist >= 1:
+            values = values * n_dist
+        if len(values) != n_dist:
+            raise ValueError(
+                f"{param_name} has {len(values)} item(s), SHAPE_DISTANCES has {n_dist}. "
+                "Provide one value (replicated) or one per distance."
+            )
+        return values
+
+    @staticmethod
+    def _parse_shape_arc_radius_factors(value_str, n_dist):
+        return AddCurveBankingToLineAlgorithm._parse_shape_replicated_values(
+            value_str,
+            n_dist,
+            "SHAPE_ARC_RADIUS_FACTOR",
+            required=False,
+            empty_default=SHAPE_DEFAULT_ARC_RADIUS_FACTOR,
+            transform=lambda x: max(0.0, float(x)),
+        )
+
     def _build_processing_input_json(self, parameters, context, input_layer, dem_layer,
                                       ribbon_width_used, ribbon_width_field_name):
         """Build the processing-script input structure (dict) for one exported ribbon.
@@ -349,6 +407,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         shape_heights_str = self.parameterAsString(parameters, self.SHAPE_HEIGHTS, context) or ''
         shape_table_lengths_str = self.parameterAsString(parameters, self.SHAPE_TABLE_LENGTHS, context) or ''
         sigmoid_lengths_str = self.parameterAsString(parameters, self.SIGMOID_LENGTHS, context) or ''
+        shape_arc_radius_factors_str = self.parameterAsString(parameters, self.SHAPE_ARC_RADIUS_FACTOR, context) or ''
         return {
             "area_units": "m2",
             "distance_units": "meters",
@@ -358,6 +417,8 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                 "DEM": dem_source,
                 "EXPORT_FORMAT": export_format_val,
                 "INPUT": input_source,
+                "CURVE_R_MAX": self.parameterAsDouble(parameters, self.CURVE_R_MAX, context) or CURVE_R_MAX_DEFAULT_M,
+                "CURVE_MIN_ARC_LENGTH": self.parameterAsDouble(parameters, self.CURVE_MIN_ARC_LENGTH, context) or CURVE_MIN_ARC_LENGTH_DEFAULT_M,
                 "OUTER_EDGE_RAISE": self.parameterAsDouble(parameters, self.OUTER_EDGE_RAISE, context) or 1.0,
                 "RIBBON_WIDTH": ribbon_width_used,
                 "RIBBON_WIDTH_FIELD": ribbon_width_field_val,
@@ -367,8 +428,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                 "SHAPE_TABLE_LENGTHS": shape_table_lengths_str,
                 "SIGMOID_LENGTHS": sigmoid_lengths_str,
                 "SIGMOID_STEEPNESS_K": SHAPE_OUTRUN_SIGMOID_K,
-                "SHAPE_ARC_RADIUS_FACTOR": self.parameterAsDouble(parameters, self.SHAPE_ARC_RADIUS_FACTOR, context) or 1.0,
-                "SIMPLE_SHAPES": self.parameterAsBool(parameters, self.SIMPLE_SHAPES, context),
+                "SHAPE_ARC_RADIUS_FACTOR": shape_arc_radius_factors_str,
                 "TEXTURE_FILE": texture_str,
                 "TRANSVERSAL_CONCAVITY": self.parameterAsDouble(parameters, self.TRANSVERSAL_CONCAVITY, context) or 0.15,
                 "TREAD_BEVEL_SIZE": self.parameterAsDouble(parameters, self.TREAD_BEVEL_SIZE, context) or 0.0,
@@ -406,9 +466,19 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         export_format = 'GLB' if export_format_idx == 1 else 'GLTF'
         texture_file = self.parameterAsString(parameters, self.TEXTURE_FILE, context) or None
         
-        # Curve detection: positive window enables it; angle/curvature from CURVE_MIN_ANGLE_DEG, CURVE_R_MAX_M
+        # Curve detection: R_max + min arc length along turning vertices
         curve_window_distance = 1.0
-        curve_threshold_angle_rad = math.radians(CURVE_MIN_ANGLE_DEG)
+        curve_r_max_m = self.parameterAsDouble(parameters, self.CURVE_R_MAX, context)
+        curve_r_max_m = float(curve_r_max_m) if curve_r_max_m is not None else CURVE_R_MAX_DEFAULT_M
+        if curve_r_max_m <= 0:
+            raise QgsProcessingException('Max curve radius R_max must be > 0.')
+        curve_min_arc_length_m = self.parameterAsDouble(parameters, self.CURVE_MIN_ARC_LENGTH, context)
+        curve_min_arc_length_m = (
+            float(curve_min_arc_length_m)
+            if curve_min_arc_length_m is not None
+            else CURVE_MIN_ARC_LENGTH_DEFAULT_M
+        )
+        curve_min_arc_length_m = max(0.0, curve_min_arc_length_m)
         outer_edge_raise = self.parameterAsDouble(parameters, self.OUTER_EDGE_RAISE, context)
         outer_edge_raise = float(outer_edge_raise) if outer_edge_raise is not None else 1.0
         transversal_concavity = self.parameterAsDouble(parameters, self.TRANSVERSAL_CONCAVITY, context)
@@ -422,18 +492,17 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         tread_bevel_size = self.parameterAsDouble(parameters, self.TREAD_BEVEL_SIZE, context)
         tread_bevel_size = max(0.0, float(tread_bevel_size) if tread_bevel_size is not None else 0.0)
 
-        simple_shapes = self.parameterAsBool(parameters, self.SIMPLE_SHAPES, context)
         shape_distances_str = self.parameterAsString(parameters, self.SHAPE_DISTANCES, context) or ''
         shape_heights_str = self.parameterAsString(parameters, self.SHAPE_HEIGHTS, context) or ''
         shape_table_lengths_str = self.parameterAsString(parameters, self.SHAPE_TABLE_LENGTHS, context) or ''
         sigmoid_lengths_str = self.parameterAsString(parameters, self.SIGMOID_LENGTHS, context) or ''
-        shape_arc_radius_factor = self.parameterAsDouble(parameters, self.SHAPE_ARC_RADIUS_FACTOR, context)
-        shape_arc_radius_factor = float(shape_arc_radius_factor) if shape_arc_radius_factor is not None else 1.0
-        shape_arc_radius_factor = max(1.0, shape_arc_radius_factor)
+        shape_arc_radius_factors_str = self.parameterAsString(parameters, self.SHAPE_ARC_RADIUS_FACTOR, context) or ''
         
         if feedback:
             feedback.pushInfo(f"Trail raise height: {z_raise} meters")
-            feedback.pushInfo(f"Curve detection: segment-based, min angle {CURVE_MIN_ANGLE_DEG}°, R_max {CURVE_R_MAX_M}m (min curvature {CURVE_MIN_CURVATURE_RAD_PER_M:.4f} rad/m)")
+            feedback.pushInfo(
+                f"Curve detection: R_max {curve_r_max_m}m, min arc length {curve_min_arc_length_m}m"
+            )
             feedback.pushInfo(f"Outer edge raise: {outer_edge_raise} meters")
             feedback.pushInfo(f"Transversal concavity: {transversal_concavity} meters")
             feedback.pushInfo(f"Back slope angle: {back_slope_angle_deg}°")
@@ -500,194 +569,103 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                     shape_heights = []
                     shape_table_lengths = []
                     sigmoid_lengths = []
+                    shape_arc_radius_factors = []
                     first_is_zero = False
                     last_is_end = False
                     use_shapes = False
                     
                     def parse_float_list(value_str):
-                        items = []
-                        for item in value_str.split(','):
-                            item = item.strip()
-                            if item:
-                                items.append(item)
-                        return items
-                    
-                    # Check if shapes should be used
-                    if simple_shapes:
-                        # Simple mode: only distances + heights. Reference length = len(distances).
-                        # Heights: either 1 value (replicated to distance length) or list same length as distances.
-                        if shape_distances_str:
-                            try:
-                                shape_distances_raw = parse_float_list(shape_distances_str)
-                                heights_parsed = parse_float_list(shape_heights_str or '')
-                                n_dist = len(shape_distances_raw)
-                                n_heights = len(heights_parsed)
-                                if n_dist > 0 and n_heights == 0:
-                                    msg = f"Feature {feature.id()}: When SHAPE_DISTANCES is provided, SHAPE_HEIGHTS cannot be empty."
-                                    if feedback:
-                                        feedback.pushWarning(msg)
-                                    raise QgsProcessingException(msg)
-                                if n_heights == 1 and n_dist >= 1:
-                                    heights_parsed = heights_parsed * n_dist
-                                    n_heights = len(heights_parsed)
-                                if n_dist == 0:
-                                    msg = f"Feature {feature.id()}: Shape dimensions (simple mode): SHAPE_DISTANCES is empty. Provide at least one distance."
-                                    if feedback:
-                                        feedback.pushWarning(msg)
-                                    raise QgsProcessingException(msg)
-                                if n_dist != n_heights:
-                                    msg = (
-                                        f"Feature {feature.id()}: Shape dimensions (simple mode): SHAPE_DISTANCES has {n_dist} item(s), SHAPE_HEIGHTS has {n_heights}. "
-                                        "Lengths must match (or use one height to replicate)."
-                                    )
-                                    if feedback:
-                                        feedback.pushWarning(msg)
-                                    raise QgsProcessingException(msg)
-                                if n_dist == n_heights and n_dist > 0:
-                                    min_shape_height = 0.25
-                                    shape_heights = []
-                                    for h_str in heights_parsed:
-                                        h = float(h_str)
-                                        if h < min_shape_height:
-                                            if feedback:
-                                                feedback.pushWarning(f"Feature {feature.id()}: Shape height {h} is below minimum {min_shape_height}, using {min_shape_height}")
-                                            h = min_shape_height
-                                        shape_heights.append(h)
-                                    # Simple mode: table length = sigmoid length = height × SHAPE_TABLE_SIGMOID_FACTOR
-                                    shape_table_lengths = [h * SHAPE_TABLE_SIGMOID_FACTOR for h in shape_heights]
-                                    sigmoid_lengths = [h * SHAPE_TABLE_SIGMOID_FACTOR for h in shape_heights]
-                                    
-                                    use_shapes = True
-                                    
-                                    # Calculate line length for 'end' keyword
-                                    line_length = geom.length()
-                                    if line_length > 0:
-                                        # Parse distances, replacing 'end' with actual line length
-                                        for idx, dist_str in enumerate(shape_distances_raw):
-                                            dist_str_lower = dist_str.lower().strip()
-                                            if dist_str_lower == 'end':
-                                                if idx == len(shape_distances_raw) - 1:
-                                                    last_is_end = True
-                                                shape_distances_raw[idx] = str(line_length)
-                                            elif dist_str_lower == '0' or dist_str == '0':
-                                                if idx == 0:
-                                                    first_is_zero = True
-                                    
-                                    if feedback:
-                                        feedback.pushInfo(f"Feature {feature.id()}: Simple shapes mode - calculated {len(shape_heights)} shapes from heights")
-                                        for i, (h, t, s) in enumerate(zip(shape_heights, shape_table_lengths, sigmoid_lengths)):
-                                            feedback.pushInfo(f"  Shape {i+1}: height={h:.2f}m, table_length={t:.2f}m, sigmoid_length={s:.2f}m")
-                            except QgsProcessingException:
-                                raise
-                            except Exception as e:
+                        return self._parse_comma_list(value_str)
+
+                    if shape_distances_str:
+                        try:
+                            shape_distances_raw = parse_float_list(shape_distances_str)
+                            n_dist = len(shape_distances_raw)
+                            if n_dist == 0:
+                                msg = f"Feature {feature.id()}: SHAPE_DISTANCES is empty. Provide at least one distance."
                                 if feedback:
-                                    feedback.pushWarning(f"Feature {feature.id()}: Error parsing simple shape parameters - {str(e)}, continuing without shapes")
-                                use_shapes = False
-                    else:
-                        # Advanced mode: only distances + heights + table lengths + sigmoid lengths. Reference length = len(distances).
-                        # Each of heights, table lengths, sigmoid lengths: either 1 value (replicated to distance length) or list same length as distances.
-                        if shape_distances_str:
-                            try:
-                                shape_distances_raw = parse_float_list(shape_distances_str)
-                                heights_parsed = parse_float_list(shape_heights_str or '')
-                                table_parsed = parse_float_list(shape_table_lengths_str or '')
-                                sigmoid_parsed = parse_float_list(sigmoid_lengths_str or '')
-                                n_dist = len(shape_distances_raw)
-                                if n_dist > 0:
-                                    empty = []
-                                    if not heights_parsed:
-                                        empty.append("SHAPE_HEIGHTS")
-                                    if not table_parsed:
-                                        empty.append("SHAPE_TABLE_LENGTHS")
-                                    if not sigmoid_parsed:
-                                        empty.append("SIGMOID_LENGTHS")
-                                    if empty:
-                                        msg = f"Feature {feature.id()}: When SHAPE_DISTANCES is provided, the following cannot be empty: {', '.join(empty)}."
-                                        if feedback:
-                                            feedback.pushWarning(msg)
-                                        raise QgsProcessingException(msg)
-                                shape_heights = [float(h) for h in heights_parsed]
-                                shape_table_lengths = [float(t) for t in table_parsed]
-                                sigmoid_lengths = [float(s) for s in sigmoid_parsed]
-                                if n_dist >= 1:
-                                    if len(shape_heights) == 1:
-                                        shape_heights = shape_heights * n_dist
-                                    if len(shape_table_lengths) == 1:
-                                        shape_table_lengths = shape_table_lengths * n_dist
-                                    if len(sigmoid_lengths) == 1:
-                                        sigmoid_lengths = sigmoid_lengths * n_dist
-                                n_heights = len(shape_heights)
-                                n_table = len(shape_table_lengths)
-                                n_sigmoid = len(sigmoid_lengths)
-                                wrong = []
-                                if n_dist == 0:
-                                    msg = f"Feature {feature.id()}: Shape dimensions (advanced mode): SHAPE_DISTANCES is empty. Provide at least one distance."
-                                    if feedback:
-                                        feedback.pushWarning(msg)
-                                    raise QgsProcessingException(msg)
-                                if n_heights != n_dist:
-                                    wrong.append(f"heights ({n_heights})")
-                                    if feedback:
-                                        feedback.pushWarning(
-                                            f"Feature {feature.id()}: SHAPE_HEIGHTS has {n_heights} item(s), SHAPE_DISTANCES has {n_dist}. "
-                                            "Lengths must match (or use one value to replicate)."
-                                        )
-                                if n_table != n_dist:
-                                    wrong.append(f"table lengths ({n_table})")
-                                    if feedback:
-                                        feedback.pushWarning(
-                                            f"Feature {feature.id()}: SHAPE_TABLE_LENGTHS has {n_table} item(s), SHAPE_DISTANCES has {n_dist}. "
-                                            "Lengths must match (or use one value to replicate)."
-                                        )
-                                if n_sigmoid != n_dist:
-                                    wrong.append(f"sigmoid lengths ({n_sigmoid})")
-                                    if feedback:
-                                        feedback.pushWarning(
-                                            f"Feature {feature.id()}: SIGMOID_LENGTHS has {n_sigmoid} item(s), SHAPE_DISTANCES has {n_dist}. "
-                                            "Lengths must match (or use one value to replicate)."
-                                        )
-                                if wrong:
-                                    msg = (
-                                        f"Feature {feature.id()}: Shape dimensions (advanced mode): reference = SHAPE_DISTANCES ({n_dist} items). "
-                                        f"Lists with wrong length: {', '.join(wrong)}. "
-                                        "All lists must have the same length as distances (or one value to replicate)."
+                                    feedback.pushWarning(msg)
+                                raise QgsProcessingException(msg)
+
+                            shape_heights = self._parse_shape_replicated_values(
+                                shape_heights_str, n_dist, "SHAPE_HEIGHTS",
+                                required=False, empty_default=SHAPE_DEFAULT_HEIGHT_M,
+                            )
+                            shape_table_lengths = self._parse_shape_replicated_values(
+                                shape_table_lengths_str, n_dist, "SHAPE_TABLE_LENGTHS",
+                                required=False, empty_default=SHAPE_DEFAULT_TABLE_LENGTH_M,
+                            )
+                            sigmoid_lengths = self._parse_shape_replicated_values(
+                                sigmoid_lengths_str, n_dist, "SIGMOID_LENGTHS",
+                                required=False, empty_default=SHAPE_DEFAULT_SIGMOID_LENGTH_M,
+                            )
+                            shape_arc_radius_factors = self._parse_shape_arc_radius_factors(
+                                shape_arc_radius_factors_str, n_dist
+                            )
+
+                            use_shapes = True
+                            line_length = geom.length()
+                            if line_length > 0:
+                                for idx, dist_str in enumerate(shape_distances_raw):
+                                    dist_str_lower = dist_str.lower().strip()
+                                    if dist_str_lower == 'end':
+                                        if idx == len(shape_distances_raw) - 1:
+                                            last_is_end = True
+                                        shape_distances_raw[idx] = str(line_length)
+                                    elif dist_str_lower == '0' or dist_str == '0':
+                                        if idx == 0:
+                                            first_is_zero = True
+                            if feedback:
+                                defaults_used = []
+                                if not self._parse_comma_list(shape_heights_str):
+                                    defaults_used.append(f"height={SHAPE_DEFAULT_HEIGHT_M}m")
+                                if not self._parse_comma_list(shape_table_lengths_str):
+                                    defaults_used.append(f"table={SHAPE_DEFAULT_TABLE_LENGTH_M}m")
+                                if not self._parse_comma_list(sigmoid_lengths_str):
+                                    defaults_used.append(f"sigmoid={SHAPE_DEFAULT_SIGMOID_LENGTH_M}m")
+                                if not self._parse_comma_list(shape_arc_radius_factors_str):
+                                    defaults_used.append(f"arc={SHAPE_DEFAULT_ARC_RADIUS_FACTOR}")
+                                if defaults_used:
+                                    feedback.pushInfo(
+                                        f"Feature {feature.id()}: shape defaults applied: {', '.join(defaults_used)}"
                                     )
-                                    if feedback:
-                                        feedback.pushWarning(msg)
-                                    raise QgsProcessingException(msg)
-                                if n_dist > 0:
-                                    use_shapes = True
-                                    line_length = geom.length()
-                                    if line_length > 0:
-                                        for idx, dist_str in enumerate(shape_distances_raw):
-                                            dist_str_lower = dist_str.lower().strip()
-                                            if dist_str_lower == 'end':
-                                                if idx == len(shape_distances_raw) - 1:
-                                                    last_is_end = True
-                                                shape_distances_raw[idx] = str(line_length)
-                                            elif dist_str_lower == '0' or dist_str == '0':
-                                                if idx == 0:
-                                                    first_is_zero = True
-                            except QgsProcessingException:
-                                raise
-                            except Exception as e:
-                                if feedback:
-                                    feedback.pushWarning(f"Feature {feature.id()}: Error parsing shape parameters - {str(e)}, continuing without shapes")
-                                use_shapes = False
+                                feedback.pushInfo(f"Feature {feature.id()}: {len(shape_heights)} shape(s) configured")
+                                for i, (h, t, s, r) in enumerate(
+                                    zip(shape_heights, shape_table_lengths, sigmoid_lengths, shape_arc_radius_factors)
+                                ):
+                                    arc_mode = "sigmoid" if r <= 0 else f"arc×{r:.2f}"
+                                    feedback.pushInfo(
+                                        f"  Shape {i+1}: height={h:.2f}m, table_length={t:.2f}m, "
+                                        f"sigmoid_length={s:.2f}m, in-run={arc_mode}"
+                                    )
+                        except ValueError as e:
+                            msg = f"Feature {feature.id()}: {e}"
+                            if feedback:
+                                feedback.pushWarning(msg)
+                            raise QgsProcessingException(msg)
+                        except QgsProcessingException:
+                            raise
+                        except Exception as e:
+                            if feedback:
+                                feedback.pushWarning(f"Feature {feature.id()}: Error parsing shape parameters - {str(e)}, continuing without shapes")
+                            use_shapes = False
                     
+                    w = self._ribbon_width_for_feature(feature, ribbon_width_field, ribbon_width)
                     result = self.apply_curve_banking(
                         geom,
                         dem_provider,
                         z_raise,
                         curve_window_distance,
-                        curve_threshold_angle_rad,
+                        curve_r_max_m,
+                        curve_min_arc_length_m,
                         outer_edge_raise,
+                        w * 0.5,
                         use_shapes,
                         shape_distances_raw if use_shapes else [],
                         shape_heights if use_shapes else [],
                         shape_table_lengths if use_shapes else [],
                         sigmoid_lengths if use_shapes else [],
-                        shape_arc_radius_factor if use_shapes else 1.0,
+                        shape_arc_radius_factors if use_shapes else [],
                         first_is_zero,
                         last_is_end,
                         feedback
@@ -695,14 +673,6 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                     
                     if isinstance(result, tuple) and len(result) >= 9:
                         original_geom, base_z_values, smoothed_z_values, curve_flags, curve_directions, banking_left, banking_right, distances, shape_z_offsets = result
-                    elif isinstance(result, tuple) and len(result) >= 7:
-                        # Fallback for old return format (single banking_heights)
-                        original_geom, base_z_values, smoothed_z_values, curve_flags, curve_directions, banking_heights, distances = result[:7]
-                        shape_z_offsets = result[7] if len(result) > 7 else ([0.0] * len(distances) if distances else [])
-                        n = len(banking_heights) if banking_heights else 0
-                        curve_dirs = curve_directions if curve_directions and len(curve_directions) == n else [0.0] * n
-                        banking_left = [banking_heights[i] if i < len(curve_dirs) and curve_dirs[i] < 0 else 0.0 for i in range(n)]
-                        banking_right = [banking_heights[i] if i < len(curve_dirs) and curve_dirs[i] > 0 else 0.0 for i in range(n)]
                     else:
                         feedback.pushWarning(f"Feature {feature.id()}: Failed to process, skipping.")
                         continue
@@ -714,7 +684,6 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                     # Export ribbon mesh
                     if base_z_values is not None and smoothed_z_values is not None:
                         try:
-                            w = self._ribbon_width_for_feature(feature, ribbon_width_field, ribbon_width)
                             result = self.export_ribbon_mesh(
                                 feature,
                                 original_geom,
@@ -834,13 +803,50 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
             return 1.0 if t >= 1.0 else (z_s / L if L > 0 else 0.0)
         return max(0.0, min(1.0, z_s / denom))
 
-    def create_curve_banking_envelope(self, curve_flags, distances, outer_edge_raise, curve_directions=None, feedback=None):
+    def _shape_inrun_height_factor(self, t, L, arc_factor):
+        """In-run height factor 0→1: sigmoid when arc_factor ≤ 0, else circular arc."""
+        if arc_factor <= 0:
+            return self.normalized_sigmoid(t, SHAPE_OUTRUN_SIGMOID_K)
+        R = max(arc_factor * L, L)
+        return self._shape_inrun_arc_height_factor(t, L, R)
+
+    @staticmethod
+    def _segment_total_angle_rad(turning_angles, start_idx, end_idx):
+        total_angle_rad = 0.0
+        for j in range(start_idx, end_idx + 1):
+            if 0 < j < len(turning_angles):
+                total_angle_rad += turning_angles[j]
+        return total_angle_rad
+
+    @staticmethod
+    def _banking_inner_edge_scale(turning_angles, start_idx, end_idx, curve_length, half_width):
         """
-        Vertex-based banking envelope. Per segment:
-          - Effective range: [start_idx - N_EXT_BEFORE, end_idx + N_EXT_AFTER] (clamped).
-          - Rise: first N_EXT_BEFORE vertices → 0 to peak (normalized_sigmoid). Fall: last N_EXT_AFTER → peak to 0 (normalized_sigmoid).
-          - Middle (all actual curve vertices): plateau at peak.
-          - Left curve (direction > 0): outer edge right → write to banking_right. Right curve (direction < 0): outer edge left → write to banking_left. Enables curve-into-curve: both sides raised in transition.
+        Centerline length factor so BANKING_*_LENGTH_M apply along the inner ribbon edge.
+        L_center = L_inner * R / (R - half_width).
+        """
+        if half_width <= 0 or curve_length <= 1e-9 or not turning_angles:
+            return 1.0
+        abs_angle = abs(
+            AddCurveBankingToLineAlgorithm._segment_total_angle_rad(
+                turning_angles, start_idx, end_idx
+            )
+        )
+        if abs_angle < 1e-6:
+            return 1.0
+        radius_m = curve_length / abs_angle
+        radius_m = max(radius_m, half_width + 1e-3)
+        return radius_m / (radius_m - half_width)
+
+    def create_curve_banking_envelope(self, curve_flags, distances, outer_edge_raise,
+                                      curve_directions=None, turning_angles=None,
+                                      half_width=0.0, feedback=None):
+        """
+        Distance-based banking envelope per curve segment:
+          - Rise/fall lengths scaled by R/(R-half_width) so BANKING_*_LENGTH_M apply on the inner edge.
+          - Rise: sigmoid 0→peak from first curve vertex over scaled rise length.
+          - Plateau: remaining curve vertices at peak.
+          - Fall: sigmoid peak→0 over scaled extension past last curve vertex.
+          - Left curve (direction > 0) → banking_right; right curve → banking_left.
         Short curves (< 6 m) use 0.5× peak.
         """
         n_vertices = len(curve_flags)
@@ -901,33 +907,30 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                 'direction': seg_dir
             })
         
-        SHORT_CURVE_LENGTH = 6.0   # m; curve length below this uses 0.5× peak
-        SHORT_CURVE_HEIGHT_FACTOR = 0.5
-        N_EXT_BEFORE = 10   # vertices before curve start; rise uses normalized_sigmoid (0 -> peak)
-        N_EXT_AFTER = 7   # vertices after curve end; fall uses normalized_sigmoid (peak -> 0)
-        BANKING_SIGMOID_K = 4.5
+        SHORT_CURVE_LENGTH = BANKING_SHORT_CURVE_LENGTH_M
+        SHORT_CURVE_HEIGHT_FACTOR = BANKING_SHORT_CURVE_HEIGHT_FACTOR
 
+        max_inner_edge_scale = 1.0
         for seg in curve_segments:
             start_idx = seg['start_idx']
             end_idx = seg['end_idx']
+            if end_idx < start_idx:
+                continue
             curve_start_dist = seg['start_dist']
             curve_end_dist = seg['end_dist']
             curve_length = curve_end_dist - curve_start_dist
-            if curve_length <= 0:
-                continue
+            # Single-vertex lobe (no ±1 expand in detection): give a nominal span so rise/fall still run
+            if curve_length < 1e-9:
+                curve_length = BANKING_MESH_STEP_M
 
-            # Effective range: curve extended by N_EXT_BEFORE before, N_EXT_AFTER after (clamped to line)
-            effective_start_idx = max(0, start_idx - N_EXT_BEFORE)
-            effective_end_idx = min(n_vertices - 1, end_idx + N_EXT_AFTER)
-            n_eff = effective_end_idx - effective_start_idx + 1
-            if n_eff < 1:
-                continue
-
-            # Rise = first N_EXT_BEFORE vertices; fall = last N_EXT_AFTER vertices (same counts as extension)
-            rise_vertex_count = min(N_EXT_BEFORE, n_eff)
-            fall_vertex_count = min(N_EXT_AFTER, n_eff)
-            if rise_vertex_count + fall_vertex_count > n_eff:
-                fall_vertex_count = n_eff - rise_vertex_count
+            edge_scale = self._banking_inner_edge_scale(
+                turning_angles, start_idx, end_idx, curve_length, half_width
+            )
+            max_inner_edge_scale = max(max_inner_edge_scale, edge_scale)
+            rise_length_m = BANKING_RISE_LENGTH_M * edge_scale
+            fall_extension_m = BANKING_FALL_EXTENSION_M * edge_scale
+            rise_end_dist = curve_start_dist + rise_length_m
+            fall_end_dist = curve_end_dist + fall_extension_m
 
             is_short = curve_length < SHORT_CURVE_LENGTH
             peak_height = (outer_edge_raise * SHORT_CURVE_HEIGHT_FACTOR) if is_short else outer_edge_raise
@@ -935,28 +938,36 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
             if feedback:
                 dir_str = "LEFT" if seg['direction'] > 0 else "RIGHT"
                 short_note = " (short: 0.5× height)" if is_short else ""
+                radius_note = (
+                    f", inner-edge scale {edge_scale:.3f} (R/(R-w))"
+                    if half_width > 0 else ""
+                )
                 feedback.pushInfo(
                     f"Banking envelope {dir_str}: curve vertices {start_idx}-{end_idx}, "
-                    f"effective {effective_start_idx}-{effective_end_idx} ({n_eff} verts), "
-                    f"rise={rise_vertex_count} fall={fall_vertex_count} verts, peak {peak_height:.2f}m{short_note}"
+                    f"rise {rise_length_m:.2f}m / fall {fall_extension_m:.2f}m on centerline "
+                    f"({BANKING_RISE_LENGTH_M:.1f}/{BANKING_FALL_EXTENSION_M:.1f}m on inner edge{radius_note}), "
+                    f"peak {peak_height:.2f}m{short_note}"
                 )
 
-            for j in range(effective_start_idx, effective_end_idx + 1):
-                offset_from_start = j - effective_start_idx
-                offset_from_end = effective_end_idx - j
+            for j in range(start_idx, n_vertices):
+                d = distances[j]
+                if d < curve_start_dist:
+                    continue
+                if d > fall_end_dist + 1e-9:
+                    break
 
-                if offset_from_start < rise_vertex_count:
-                    t = offset_from_start / max(1, rise_vertex_count - 1) if rise_vertex_count > 1 else 1.0
-                    envelope = peak_height * self.normalized_sigmoid(t, BANKING_SIGMOID_K)
-                elif offset_from_end < fall_vertex_count:
-                    # t: 0 at curve exit (peak), 1 at end of extension (0)
-                    t = 1.0 - (offset_from_end / max(1, fall_vertex_count - 1)) if fall_vertex_count > 1 else 0.0
-                    envelope = peak_height * (1.0 - self.normalized_sigmoid(t, BANKING_SIGMOID_K))
+                if d <= curve_end_dist:
+                    if d <= rise_end_dist + 1e-9:
+                        t = (d - curve_start_dist) / rise_length_m if rise_length_m > 1e-9 else 1.0
+                        envelope = peak_height * self.normalized_sigmoid(t, BANKING_SIGMOID_K)
+                    else:
+                        envelope = peak_height
                 else:
-                    # Plateau
-                    envelope = peak_height
+                    t = (d - curve_end_dist) / fall_extension_m if fall_extension_m > 1e-9 else 1.0
+                    envelope = peak_height * (
+                        1.0 - self.normalized_sigmoid(t, BANKING_SIGMOID_K)
+                    )
 
-                # Per-side: left curve (dir>0) raises right edge; right curve (dir<0) raises left edge
                 if seg['direction'] > 0:
                     if envelope > banking_right[j]:
                         banking_right[j] = envelope
@@ -964,17 +975,19 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                     if envelope > banking_left[j]:
                         banking_left[j] = envelope
         
-        return (banking_left, banking_right)
+        return (banking_left, banking_right, max_inner_edge_scale)
     
     def apply_curve_banking(self, geometry, dem_provider, z_raise, 
-                           curve_window_distance, curve_threshold_angle,
-                           outer_edge_raise, use_shapes=False, shape_distances_raw=None,
+                           curve_window_distance,
+                           curve_r_max_m, curve_min_arc_length_m,
+                           outer_edge_raise, ribbon_half_width=0.0,
+                           use_shapes=False, shape_distances_raw=None,
                            shape_heights=None, shape_table_lengths=None, sigmoid_lengths=None,
-                           shape_arc_radius_factor=1.0, first_is_zero=False, last_is_end=False, feedback=None):
+                           shape_arc_radius_factors=None, first_is_zero=False, last_is_end=False, feedback=None):
         """
         Apply curve detection and banking to a linestring.
         Segment-based curve detection (same-sign turning angles, total angle and curvature threshold).
-        For each detected curve segment, raises the outer edge with a vertex-based sigmoid banking envelope.
+        Banking envelope rise/fall lengths are inner-edge metres, scaled to centerline via R/(R-w).
         """
         # Validate geometry
         if geometry is None or geometry.isEmpty():
@@ -983,13 +996,18 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         # Store original geometry reference - we'll use it directly for XY positions
         original_geometry = geometry
         
-        # Densify to 0.5 m along axis and run segment-based curve detection on those vertices.
-        # Returns original geometry reference + distances + curve flags/directions.
-        curve_flags = []
-        distances = []
-        
-        # Curve detection uses CURVE_MIN_ANGLE_DEG and CURVE_R_MAX_M; curve_window_distance > 0 only enables it
-        original_geometry, curve_flags, curve_directions, distances = self._densify_adaptive(geometry, curve_window_distance, curve_threshold_angle, feedback)
+        # Densify along axis (finer step when banking) and run segment-based curve detection.
+        mesh_step_m = BANKING_MESH_STEP_M if outer_edge_raise > 1e-9 else 0.5
+        if feedback and outer_edge_raise > 1e-9:
+            feedback.pushInfo(
+                f"Banking mesh sampling: {mesh_step_m} m along axis "
+                f"(rise {BANKING_RISE_LENGTH_M} m / fall {BANKING_FALL_EXTENSION_M} m on inner edge, "
+                f"scaled by R/(R-w) with w={ribbon_half_width:.2f} m)"
+            )
+        original_geometry, curve_flags, curve_directions, distances, turning_angles = self._densify_adaptive(
+            geometry, curve_window_distance,
+            curve_r_max_m, curve_min_arc_length_m, mesh_step_m, feedback
+        )
         
         # Get vertices for DEM sampling - use distances to interpolate from original geometry
         # We need vertices for DEM sampling, but we'll use original geometry for XY in export
@@ -1072,8 +1090,17 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         # Step 4: Apply shapes if provided
         shape_z_offsets = [0.0] * len(vertices)
         if use_shapes and shape_distances_raw and shape_heights and shape_table_lengths and sigmoid_lengths:
+            if not shape_arc_radius_factors:
+                shape_arc_radius_factors = [1.0] * len(shape_distances_raw)
             total_length = distances[-1] if distances else 0.0
-            shapes = list(zip([float(d) for d in shape_distances_raw], shape_heights, shape_table_lengths, sigmoid_lengths, range(len(shape_distances_raw))))
+            shapes = list(zip(
+                [float(d) for d in shape_distances_raw],
+                shape_heights,
+                shape_table_lengths,
+                sigmoid_lengths,
+                shape_arc_radius_factors,
+                range(len(shape_distances_raw)),
+            ))
             
             for i, vertex in enumerate(vertices):
                 distance_along = distances[i]
@@ -1084,6 +1111,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                     first_height = shape_heights[0]
                     first_table_len = shape_table_lengths[0]
                     first_sigmoid_len = sigmoid_lengths[0]
+                    first_arc_factor = shape_arc_radius_factors[0]
                     half_table_length = first_table_len / 2.0
                     half_wave_length = half_table_length + first_sigmoid_len
                     if distance_along <= half_wave_length:
@@ -1092,10 +1120,10 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                         else:
                             t = (distance_along - half_table_length) / first_sigmoid_len
                             if t <= 1.0:
-                                L = first_sigmoid_len
-                                R = max(shape_arc_radius_factor * L, L)
-                                arc_val = self._shape_inrun_arc_height_factor(t, L, R)
-                                shape_z_offset = first_height * (1.0 - arc_val)
+                                inrun_val = self._shape_inrun_height_factor(
+                                    t, first_sigmoid_len, first_arc_factor
+                                )
+                                shape_z_offset = first_height * (1.0 - inrun_val)
                             else:
                                 shape_z_offset = 0.0
                         shape_z_offset = max(0.0, shape_z_offset)
@@ -1125,7 +1153,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                         shape_z += shape_z_offset
                 
                 # Normal shapes
-                for shape_dist, shape_height, table_len, sigmoid_len, orig_idx in shapes:
+                for shape_dist, shape_height, table_len, sigmoid_len, arc_factor, orig_idx in shapes:
                     if first_is_zero and abs(shape_dist) < 1e-9:
                         continue
                     if last_is_end and abs(shape_dist - total_length) < 1e-9:
@@ -1140,10 +1168,8 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                         if pos_from_wave_start <= sigmoid_len:
                             t = pos_from_wave_start / sigmoid_len
                             if t <= 1.0:
-                                L = sigmoid_len
-                                R = max(shape_arc_radius_factor * L, L)
-                                arc_val = self._shape_inrun_arc_height_factor(t, L, R)
-                                shape_z_offset = shape_height * arc_val
+                                inrun_val = self._shape_inrun_height_factor(t, sigmoid_len, arc_factor)
+                                shape_z_offset = shape_height * inrun_val
                             else:
                                 shape_z_offset = shape_height
                         elif pos_from_wave_start <= sigmoid_len + table_len:
@@ -1162,66 +1188,104 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                 shape_z_offsets[i] = shape_z
         
         # Create per-side banking envelope (curve-into-curve: both sides can be raised in transition)
-        banking_left, banking_right = self.create_curve_banking_envelope(
-            curve_flags, distances, outer_edge_raise, curve_directions, feedback
+        banking_left, banking_right, max_inner_edge_scale = self.create_curve_banking_envelope(
+            curve_flags, distances, outer_edge_raise, curve_directions,
+            turning_angles, ribbon_half_width, feedback
         )
         
         if feedback:
             n = len(banking_left)
             max_banking = max(max(banking_left or [0]), max(banking_right or [0]))
             num_with_banking = sum(1 for i in range(n) if banking_left[i] > 0 or banking_right[i] > 0)
-            feedback.pushInfo(f"Banking heights calculated: max={max_banking:.3f}m, {num_with_banking} vertices with banking out of {n} total")
+            num_dual = sum(
+                1 for i in range(n)
+                if banking_left[i] > 1e-6 and banking_right[i] > 1e-6
+            )
+            feedback.pushInfo(
+                f"Banking heights calculated: max={max_banking:.3f}m, "
+                f"{num_with_banking} vertices with banking, {num_dual} dual-side (L and R > 0) out of {n}"
+            )
+            # Log S-junctions: direction change while still in curve flags
+            def _ds(idx):
+                d = curve_directions[idx] if idx < len(curve_directions) else 0.0
+                return 1 if d > 0 else (-1 if d < 0 else 0)
+            for i in range(1, n):
+                if not (curve_flags[i] and curve_flags[i - 1]):
+                    continue
+                if _ds(i - 1) == 0 or _ds(i) == 0 or _ds(i - 1) == _ds(i):
+                    continue
+                # Sample from junction through fall/rise window
+                fall_window_m = BANKING_FALL_EXTENSION_M * max_inner_edge_scale
+                j1 = min(n - 1, i + max(1, int(fall_window_m / max(BANKING_MESH_STEP_M, 0.1))))
+                dual_in_window = sum(
+                    1 for j in range(i, j1 + 1)
+                    if banking_left[j] > 1e-6 and banking_right[j] > 1e-6
+                )
+                feedback.pushInfo(
+                    f"S-junction at vertex {i} (dist {distances[i]:.2f}m): "
+                    f"dir {_ds(i-1)}→{_ds(i)}, "
+                    f"at junction L={banking_left[i]:.3f} R={banking_right[i]:.3f}, "
+                    f"dual-side samples in next {fall_window_m:.1f}m: {dual_in_window}"
+                )
         
         return (original_geometry, base_z_values, smoothed_z_values, curve_flags,
                 curve_directions, banking_left, banking_right, distances, shape_z_offsets)
     
-    def _densify_adaptive(self, geometry, curve_window_distance, curve_threshold_angle, feedback=None):
+    def _densify_adaptive(self, geometry, curve_window_distance,
+                          curve_r_max_m, curve_min_arc_length_m, sample_step_m=0.5, feedback=None):
         """
-        Densify geometry to fixed 0.5 m spacing along the axis.
-        Process: 1) Densify to 0.5 m, 2) Signed turning angles,
-        3) Segment-based curve detection: same-sign segments with total angle >= CURVE_MIN_ANGLE_DEG and mean curvature >= 1/R_max.
-        All vertices at 0.5 m along the axis.
+        Densify geometry to fixed spacing along the axis (default 0.5 m; 0.25 m when banking).
+        Process: 1) Densify, 2) Signed turning angles,
+        3) Segment-based curve detection: same-sign segments with effective radius ≤ R_max
+           and arc length (first→last turning vertex) ≥ min arc length.
         Z values are NOT preserved - they will be sampled from DEM afterwards.
         
         Args:
             geometry: QgsGeometry linestring (2D or 3D, but only X/Y spacing is ensured)
-            curve_window_distance: If > 0, curve detection is run; segment-based detection uses CURVE_MIN_ANGLE_DEG and CURVE_R_MAX_M.
-            curve_threshold_angle: Unused (kept for API compatibility).
+            curve_window_distance: If > 0, curve detection is run.
+            curve_r_max_m: Max effective radius (m) for banking.
+            curve_min_arc_length_m: Min centerline arc length (m) between first and last turning vertex.
+            sample_step_m: Vertex spacing along the line (m).
             feedback: Optional QgsProcessingFeedback for progress
             
         Returns:
-            Tuple: (QgsGeometry, curve_flags list, curve_directions list, distances list)
+            Tuple: (QgsGeometry, curve_flags, curve_directions, distances, turning_angles)
         """
-        curve_detection_interval = 0.5  # used in fallback except block too
+        curve_detection_interval = max(0.1, float(sample_step_m))
 
         if geometry is None or geometry.isEmpty():
-            return (geometry, [], [], [0.0])
+            return (geometry, [], [], [0.0], [])
         
         try:
-            geometry_025m = self._densify_at_exact_intervals(geometry, curve_detection_interval, feedback)
+            geometry_dense = self._densify_at_exact_intervals(geometry, curve_detection_interval, feedback)
             
             # Get vertices at fixed spacing
-            vertices_025m = list(geometry_025m.vertices())
-            if len(vertices_025m) < 3:
+            vertices_dense = list(geometry_dense.vertices())
+            if len(vertices_dense) < 3:
                 # Too few vertices, return as-is
-                return (geometry, [False] * len(vertices_025m), [0.0] * len(vertices_025m), [0.0] * len(vertices_025m))
+                n = len(vertices_dense)
+                return (
+                    geometry,
+                    [False] * n,
+                    [0.0] * n,
+                    [0.0] * n,
+                    [0.0] * n,
+                )
             
             # Use exact interval spacing for distances along line
-            # Vertices at 0, interval, 2*interval, ..., total_length
             total_length = geometry.length()
-            distances_025m = []
-            for i in range(len(vertices_025m)):
+            distances_dense = []
+            for i in range(len(vertices_dense)):
                 dist = min(i * curve_detection_interval, total_length)
-                distances_025m.append(dist)
+                distances_dense.append(dist)
             
             # Pass 2: Calculate signed turning angles (+180/-180 normalized) for each vertex
-            # This is a vertex attribute: positive = left turn, negative = right turn, 0 = straight
-            turning_angles = [0.0] * len(vertices_025m)  # Signed angles in radians
+            turning_angles = [0.0] * len(vertices_dense)  # Signed angles in radians
             
-            for i in range(1, len(vertices_025m) - 1):
-                v_prev = vertices_025m[i-1]
-                v_curr = vertices_025m[i]
-                v_next = vertices_025m[i+1]
+            for i in range(1, len(vertices_dense) - 1):
+                v_prev = vertices_dense[i-1]
+                v_curr = vertices_dense[i]
+                v_next = vertices_dense[i+1]
                 
                 # Calculate vectors
                 dx1 = v_curr.x() - v_prev.x()
@@ -1260,28 +1324,29 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                 feedback.pushInfo(f"Pass 2: Calculated signed turning angles for {len(turning_angles)} vertices")
                 feedback.pushInfo(f"  Min angle: {min_angle:.4f} rad ({math.degrees(min_angle):.2f}°), Max angle: {max_angle:.4f} rad ({math.degrees(max_angle):.2f}°)")
             
-            # Pass 3: Segment-based curve detection.
-            # Same-sign segments: total angle >= CURVE_MIN_ANGLE_DEG and mean curvature >= 1/R_max (excludes long gentle arcs).
-            curve_flags_025m = [False] * len(vertices_025m)
-            curve_directions_025m = [0.0] * len(vertices_025m)
-            min_angle_rad = math.radians(CURVE_MIN_ANGLE_DEG)
+            # Same-sign segments: effective radius ≤ R_max and arc length ≥ min (vertex span).
+            curve_flags_dense = [False] * len(vertices_dense)
+            curve_directions_dense = [0.0] * len(vertices_dense)
             
             if curve_window_distance > 0:
                 if feedback:
                     feedback.pushInfo(f"Pass 3: Segment-based curve detection")
-                    feedback.pushInfo(f"  Min total angle: {CURVE_MIN_ANGLE_DEG}°, R_max: {CURVE_R_MAX_M}m, min curvature: {CURVE_MIN_CURVATURE_RAD_PER_M:.4f} rad/m")
+                    feedback.pushInfo(
+                        f"  R_max: {curve_r_max_m}m, min arc length: {curve_min_arc_length_m}m"
+                    )
                 
                 # Build same-sign segments: contiguous runs of turning_angles with same sign.
-                # Segment (start_idx, end_idx) = vertex range; turning angles in segment are at start_idx+1 .. end_idx-1.
+                # Bounds are exactly the turning vertices (no ±1 expand into the opposite turn —
+                # that overwrote curve_directions at S-junctions and killed dual-side banking).
                 segments = []  # list of (start_idx, end_idx, sign)
-                run_start = None  # first vertex index of current run (in turning_angles index)
+                run_start = None
                 seg_sign = 0
-                for i in range(1, len(vertices_025m) - 1):
+                for i in range(1, len(vertices_dense) - 1):
                     sign = 1 if turning_angles[i] > 0 else (-1 if turning_angles[i] < 0 else 0)
                     if sign != 0:
                         if seg_sign != sign:
                             if run_start is not None:
-                                segments.append((run_start - 1, run_end + 1, seg_sign))
+                                segments.append((run_start, run_end, seg_sign))
                             run_start = i
                             run_end = i
                             seg_sign = sign
@@ -1289,80 +1354,55 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                             run_end = i
                     else:
                         if run_start is not None:
-                            segments.append((run_start - 1, run_end + 1, seg_sign))
+                            segments.append((run_start, run_end, seg_sign))
                             run_start = None
                         seg_sign = 0
                 if run_start is not None:
-                    segments.append((run_start - 1, run_end + 1, seg_sign))
+                    segments.append((run_start, run_end, seg_sign))
                 
                 curve_count = 0
+                n_dist = len(distances_dense)
                 for (start_idx, end_idx, direction) in segments:
-                    if start_idx >= end_idx:
+                    if start_idx > end_idx:
                         continue
-                    # Sum turning angles in segment (at vertices start_idx+1 .. end_idx-1)
-                    total_angle_rad = 0.0
-                    for j in range(start_idx + 1, end_idx):
-                        if 0 < j < len(turning_angles):
-                            total_angle_rad += turning_angles[j]
-                    segment_length = distances_025m[end_idx] - distances_025m[start_idx]
-                    if segment_length < 1e-9:
+                    # Sum turning angles on the same-sign vertices themselves
+                    total_angle_rad = self._segment_total_angle_rad(
+                        turning_angles, start_idx, end_idx
+                    )
+                    arc_length = distances_dense[end_idx] - distances_dense[start_idx]
+                    if arc_length < 1e-9:
                         continue
-                    mean_curvature = abs(total_angle_rad) / segment_length
-                    # Curve if total angle >= CURVE_MIN_ANGLE_DEG and mean curvature >= 1/R_max (radius <= R_max)
-                    if abs(total_angle_rad) >= min_angle_rad and mean_curvature >= CURVE_MIN_CURVATURE_RAD_PER_M:
+                    abs_angle = abs(total_angle_rad)
+                    if abs_angle < 1e-6:
+                        continue
+                    effective_radius_m = arc_length / abs_angle
+                    if effective_radius_m <= curve_r_max_m and arc_length >= curve_min_arc_length_m:
                         for j in range(start_idx, end_idx + 1):
-                            curve_flags_025m[j] = True
-                            curve_directions_025m[j] = float(direction)
+                            curve_flags_dense[j] = True
+                            curve_directions_dense[j] = float(direction)
                         curve_count += 1
                         if feedback:
                             dir_str = "LEFT" if direction > 0 else "RIGHT"
-                            start_dist = distances_025m[start_idx] if start_idx < len(distances_025m) else 0.0
-                            end_dist = distances_025m[end_idx] if end_idx < len(distances_025m) else 0.0
-                            feedback.pushInfo(f"  Curve {dir_str}: vertices {start_idx}-{end_idx}, distances {start_dist:.2f}-{end_dist:.2f}m, length {segment_length:.2f}m, total angle {math.degrees(abs(total_angle_rad)):.1f}°, mean curvature {mean_curvature:.4f} rad/m")
+                            start_dist = distances_dense[start_idx] if start_idx < n_dist else 0.0
+                            end_dist = distances_dense[end_idx] if end_idx < n_dist else 0.0
+                            feedback.pushInfo(
+                                f"  Curve {dir_str}: vertices {start_idx}-{end_idx}, "
+                                f"distances {start_dist:.2f}-{end_dist:.2f}m, arc {arc_length:.2f}m, "
+                                f"R_eff {effective_radius_m:.2f}m, "
+                                f"total angle {math.degrees(abs_angle):.1f}°"
+                            )
                 
                 if feedback:
-                    total_curve_vertices = sum(1 for f in curve_flags_025m if f)
-                    feedback.pushInfo(f"Pass 3 Summary: Detected {curve_count} curve segments, {total_curve_vertices} curve vertices out of {len(vertices_025m)} total vertices")
+                    total_curve_vertices = sum(1 for f in curve_flags_dense if f)
+                    feedback.pushInfo(f"Pass 3 Summary: Detected {curve_count} curve segments, {total_curve_vertices} curve vertices out of {len(vertices_dense)} total vertices")
 
             if feedback:
-                num_curves = sum(1 for f in curve_flags_025m if f)
-                feedback.pushInfo(f"Densification: {len(distances_025m)} vertices at {curve_detection_interval} m along axis (curves: {num_curves} vertices).")
-                # Summary of detected curves (split on curve/straight and on left/right change)
-                def _dir_sign(idx):
-                    d = curve_directions_025m[idx] if idx < len(curve_directions_025m) else 0.0
-                    return 1 if d > 0 else (-1 if d < 0 else 0)
-                in_curve = False
-                curve_num = 0
-                for i in range(len(curve_flags_025m)):
-                    if curve_flags_025m[i] and not in_curve:
-                        in_curve = True
-                        curve_start = i
-                        curve_dir = curve_directions_025m[i]
-                    elif not curve_flags_025m[i] and in_curve:
-                        in_curve = False
-                        curve_end = i - 1
-                        curve_num += 1
-                        dir_str = "LEFT" if curve_dir > 0 else "RIGHT"
-                        start_dist = distances_025m[curve_start] if curve_start < len(distances_025m) else 0.0
-                        end_dist = distances_025m[curve_end] if curve_end < len(distances_025m) else 0.0
-                        feedback.pushInfo(f"  Curve {curve_num} ({dir_str}): vertex indices {curve_start}-{curve_end}, distances {start_dist:.2f}-{end_dist:.2f}m")
-                    elif curve_flags_025m[i] and in_curve and i > curve_start and _dir_sign(curve_start) != _dir_sign(i):
-                        curve_end = i - 1
-                        curve_num += 1
-                        dir_str = "LEFT" if curve_dir > 0 else "RIGHT"
-                        start_dist = distances_025m[curve_start] if curve_start < len(distances_025m) else 0.0
-                        end_dist = distances_025m[curve_end] if curve_end < len(distances_025m) else 0.0
-                        feedback.pushInfo(f"  Curve {curve_num} ({dir_str}): vertex indices {curve_start}-{curve_end}, distances {start_dist:.2f}-{end_dist:.2f}m")
-                        curve_start = i
-                        curve_dir = curve_directions_025m[i]
-                if in_curve:
-                    curve_num += 1
-                    curve_end = len(curve_flags_025m) - 1
-                    dir_str = "LEFT" if curve_dir > 0 else "RIGHT"
-                    start_dist = distances_025m[curve_start] if curve_start < len(distances_025m) else 0.0
-                    end_dist = distances_025m[curve_end] if curve_end < len(distances_025m) else 0.0
-                    feedback.pushInfo(f"  Curve {curve_num} ({dir_str}): vertex indices {curve_start}-{curve_end}, distances {start_dist:.2f}-{end_dist:.2f}m")
-            return (geometry, curve_flags_025m, curve_directions_025m, distances_025m)
+                num_curves = sum(1 for f in curve_flags_dense if f)
+                feedback.pushInfo(
+                    f"Densification: {len(distances_dense)} vertices at {curve_detection_interval} m "
+                    f"along axis (curves: {num_curves} vertices)."
+                )
+            return (geometry, curve_flags_dense, curve_directions_dense, distances_dense, turning_angles)
                 
         except Exception as e:
             if feedback:
@@ -1377,8 +1417,15 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                         fallback_distances.append(dist)
                 if fallback_distances[-1] < total_length - 1e-6:
                     fallback_distances.append(total_length)
-                return (geometry, [False] * len(fallback_distances), [0.0] * len(fallback_distances), fallback_distances)
-            return (geometry, [], [], [0.0])
+                n = len(fallback_distances)
+                return (
+                    geometry,
+                    [False] * n,
+                    [0.0] * n,
+                    fallback_distances,
+                    [0.0] * n,
+                )
+            return (geometry, [], [], [0.0], [])
     
     def _densify_at_exact_intervals(self, geometry, interval_distance, feedback=None):
         """
