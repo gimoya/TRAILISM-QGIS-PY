@@ -55,12 +55,15 @@ BANKING_SHORT_CURVE_HEIGHT_FACTOR = 0.75
 # Tread fade at ends: raise ramps 0->1 over first N vertices and 1->0 over last N; end caps are skipped
 TREAD_FADE_VERTICES = 5
 
-# Shape ramps: in-run = circular arc (tangent to level tread); out-run = sigmoid with fixed steepness.
-SHAPE_OUTRUN_SIGMOID_K = 4.5  # hardcoded steepness for shape out-run (fall) only
+# Shape ramps: sigmoid (0), circular arc (1–98), or linear (≥99).
+SHAPE_OUTRUN_SIGMOID_K = 4.5  # steepness when arc factor ≤ 0 (sigmoid mode)
+SHAPE_LINEAR_RAMP_FACTOR_MIN = 99  # arc factor ≥ this → straight linear ramp in/out
 SHAPE_DEFAULT_HEIGHT_M = 0.5
 SHAPE_DEFAULT_TABLE_LENGTH_M = 0.0
 SHAPE_DEFAULT_SIGMOID_LENGTH_M = 2.5
-SHAPE_DEFAULT_ARC_RADIUS_FACTOR = 1.0
+SHAPE_DEFAULT_ARC_RADIUS_FACTOR = 0
+SHAPE_DEFAULT_ARC_RADIUS_FACTOR_LANDING = 0
+SHAPE_LANDING_LENGTH_FACTOR_DEFAULT = 1.5  # UI default; scales landing when in-run or landing uses arc
 
 # Texture UV: world-space scale (meters per texture tile); 1.0 = one tile per meter along/across
 TEXTURE_SCALE_M = 1.0
@@ -90,6 +93,8 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
     SHAPE_TABLE_LENGTHS = 'SHAPE_TABLE_LENGTHS'
     SIGMOID_LENGTHS = 'SIGMOID_LENGTHS'
     SHAPE_ARC_RADIUS_FACTOR = 'SHAPE_ARC_RADIUS_FACTOR'
+    SHAPE_ARC_RADIUS_FACTOR_LANDING = 'SHAPE_ARC_RADIUS_FACTOR_LANDING'
+    SHAPE_LANDING_LENGTH_FACTOR = 'SHAPE_LANDING_LENGTH_FACTOR'
     OUTPUT_GEOJSON = 'OUTPUT_GEOJSON'
 
     def tr(self, string):
@@ -135,8 +140,8 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
             '- Tread edge bevel: Chamfer size (m) for the left and right tread edges. 0 = no bevel. Use period (.) for decimal.\n'
             '- Ribbon width: Width of exported mesh (m). Default: 2.0, minimum: 0.5. Optional attribute field overrides per feature.\n'
             '- Texture file: Optional image (PNG/JPG) for the ribbon surface.\n'
-            '- Shape distances: Reference list (one per shape). Comma-separated metres from trail start. Keywords: "0" = start, "end" = line end (last item only). Not replicated.\n'
-            '- Shape heights / table lengths / sigmoid lengths / arc factors: One value replicates to every shape; otherwise one per distance. Empty uses defaults: height 0.5 m, table 0 m, sigmoid 2.0 m, arc 1.0. Heights ≥0. Table ≥0 (0 = no plateau). Sigmoid >0. Arc: 0 = sigmoid in-run, ≥1 = circular arc (1 = quarter circle, >1 = gentler).\n'
+            '- Shape distances: Spacing increments between shapes (cumulative along trail). Comma-separated metres; e.g. 8,8,8 places shapes at 8, 16, 24 m. Keywords: "0" = start (first item only), "end" = line end (last item only). Not replicated.\n'
+            '- Shape heights / table lengths / sigmoid lengths / arc factors: One value replicates to every shape; otherwise one per distance. Empty uses defaults: height 0.5 m, table 0 m, sigmoid 2.5 m, in-run arc 0, landing arc 0. Arc factor: 0 = sigmoid, 1–98 = circular arc, ≥99 = linear ramp. Landing length factor applies when either side is not sigmoid.\n'
             '- Export format: GLTF or GLB.\n\n'
             'Output:\n'
             '- Ribbon meshes written to the project home directory (or script directory if no project path). Filename from feature "name" field or FID. Meshes are in local coordinates (origin at mesh centroid) for use with Qgis2threejs.\n'
@@ -277,7 +282,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterString(
                 self.SHAPE_DISTANCES,
-                'Shape distances (comma-separated, m). One per shape — reference list, not replicated. Use "0" for start, "end" for line end (last item). Period (.) for decimals.',
+                'Shape distances (comma-separated, m). Spacing increments — cumulative along trail (8,8,8 → 8, 16, 24). One per shape, not replicated. "0" = start (first only), "end" = line end (last only). Period (.) for decimals.',
                 defaultValue='',
                 optional=True
             )
@@ -304,7 +309,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterString(
                 self.SIGMOID_LENGTHS,
-                'Sigmoid lengths (comma-separated, m). Range: >0. Empty = 2.0 m for all. Out-run fall; in-run when arc = 0. One value replicates; else one per distance.',
+                'Sigmoid lengths (comma-separated, m). Range: >0. Empty = 2.5 m for all. Transition length for in-run and landing. One value replicates; else one per distance.',
                 defaultValue='',
                 optional=True
             )
@@ -313,15 +318,34 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterString(
                 self.SHAPE_ARC_RADIUS_FACTOR,
-                'Arc radius factors (comma-separated). 0 = sigmoid in-run; ≥1 = arc (1 = quarter circle, >1 = gentler). Empty = 1.0 for all. One value replicates; else one per distance.',
+                'Arc radius factors — in-run (comma-separated). 0 = sigmoid; 1–98 = arc (1 = quarter circle, >1 = gentler); ≥99 = linear ramp. Empty = 0 for all. One value replicates; else one per distance.',
                 defaultValue='',
                 optional=True
             )
         )
 
         self.addParameter(
+            QgsProcessingParameterString(
+                self.SHAPE_ARC_RADIUS_FACTOR_LANDING,
+                'Arc radius factors — landing (comma-separated). 0 = sigmoid; 1–98 = arc fall; ≥99 = linear fall. Empty = 0 for all. One value replicates; else one per distance.',
+                defaultValue='',
+                optional=True
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.SHAPE_LANDING_LENGTH_FACTOR,
+                'Landing length factor. Range: >0. Default: 1.5. Landing transition = in-run length × factor when in-run or landing uses arc; no scale when both are sigmoid (0).',
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=SHAPE_LANDING_LENGTH_FACTOR_DEFAULT,
+                minValue=0.1,
+            )
+        )
+
+        self.addParameter(
             QgsProcessingParameterFileDestination(
-                self.OUTPUT_GEOJSON,
+                self.OUTPUT_GEOJSON, 
                 'Ribbon locations GeoJSON output file (optional)',
                 fileFilter='GeoJSON (*.geojson)',
                 optional=True
@@ -392,6 +416,39 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
             transform=lambda x: max(0.0, float(x)),
         )
 
+    @staticmethod
+    def _parse_shape_arc_radius_factors_landing(value_str, n_dist):
+        return AddCurveBankingToLineAlgorithm._parse_shape_replicated_values(
+            value_str,
+            n_dist,
+            "SHAPE_ARC_RADIUS_FACTOR_LANDING",
+            required=False,
+            empty_default=SHAPE_DEFAULT_ARC_RADIUS_FACTOR_LANDING,
+            transform=lambda x: max(0.0, float(x)),
+        )
+
+    @staticmethod
+    def _shape_distances_to_cumulative(distance_strs):
+        """
+        Convert comma-separated spacing increments to cumulative centre positions (m from trail start).
+        Keywords '0' (first item only) and 'end' (any item) are passed through for later resolution.
+        Example: 8,8,8 → 8,16,24.
+        """
+        result = []
+        running = 0.0
+        for idx, item in enumerate(distance_strs):
+            s = item.strip()
+            s_lower = s.lower()
+            if s_lower == 'end':
+                result.append(s)
+            elif idx == 0 and s_lower == '0':
+                result.append('0')
+                running = 0.0
+            else:
+                running += float(s)
+                result.append(str(running))
+        return result
+
     def _build_processing_input_json(self, parameters, context, input_layer, dem_layer,
                                       ribbon_width_used, ribbon_width_field_name):
         """Build the processing-script input structure (dict) for one exported ribbon.
@@ -408,6 +465,17 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         shape_table_lengths_str = self.parameterAsString(parameters, self.SHAPE_TABLE_LENGTHS, context) or ''
         sigmoid_lengths_str = self.parameterAsString(parameters, self.SIGMOID_LENGTHS, context) or ''
         shape_arc_radius_factors_str = self.parameterAsString(parameters, self.SHAPE_ARC_RADIUS_FACTOR, context) or ''
+        shape_arc_radius_factors_landing_str = self.parameterAsString(
+            parameters, self.SHAPE_ARC_RADIUS_FACTOR_LANDING, context
+        ) or ''
+        shape_landing_length_factor = self.parameterAsDouble(
+            parameters, self.SHAPE_LANDING_LENGTH_FACTOR, context
+        )
+        shape_landing_length_factor = (
+            float(shape_landing_length_factor)
+            if shape_landing_length_factor is not None
+            else SHAPE_LANDING_LENGTH_FACTOR_DEFAULT
+        )
         return {
             "area_units": "m2",
             "distance_units": "meters",
@@ -429,6 +497,8 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                 "SIGMOID_LENGTHS": sigmoid_lengths_str,
                 "SIGMOID_STEEPNESS_K": SHAPE_OUTRUN_SIGMOID_K,
                 "SHAPE_ARC_RADIUS_FACTOR": shape_arc_radius_factors_str,
+                "SHAPE_ARC_RADIUS_FACTOR_LANDING": shape_arc_radius_factors_landing_str,
+                "SHAPE_LANDING_LENGTH_FACTOR": shape_landing_length_factor,
                 "TEXTURE_FILE": texture_str,
                 "TRANSVERSAL_CONCAVITY": self.parameterAsDouble(parameters, self.TRANSVERSAL_CONCAVITY, context) or 0.15,
                 "TREAD_BEVEL_SIZE": self.parameterAsDouble(parameters, self.TREAD_BEVEL_SIZE, context) or 0.0,
@@ -497,6 +567,19 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         shape_table_lengths_str = self.parameterAsString(parameters, self.SHAPE_TABLE_LENGTHS, context) or ''
         sigmoid_lengths_str = self.parameterAsString(parameters, self.SIGMOID_LENGTHS, context) or ''
         shape_arc_radius_factors_str = self.parameterAsString(parameters, self.SHAPE_ARC_RADIUS_FACTOR, context) or ''
+        shape_arc_radius_factors_landing_str = self.parameterAsString(
+            parameters, self.SHAPE_ARC_RADIUS_FACTOR_LANDING, context
+        ) or ''
+        shape_landing_length_factor = self.parameterAsDouble(
+            parameters, self.SHAPE_LANDING_LENGTH_FACTOR, context
+        )
+        shape_landing_length_factor = (
+            float(shape_landing_length_factor)
+            if shape_landing_length_factor is not None
+            else SHAPE_LANDING_LENGTH_FACTOR_DEFAULT
+        )
+        if shape_landing_length_factor <= 0:
+            raise QgsProcessingException('Landing length factor must be > 0.')
         
         if feedback:
             feedback.pushInfo(f"Trail raise height: {z_raise} meters")
@@ -508,6 +591,11 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
             feedback.pushInfo(f"Back slope angle: {back_slope_angle_deg}°")
             if tread_bevel_size > 0:
                 feedback.pushInfo(f"Tread edge bevel: {tread_bevel_size} m")
+            if shape_distances_str:
+                feedback.pushInfo(
+                    f"Shape landing length factor: {shape_landing_length_factor} "
+                    f"(arc landing only; sigmoid both sides = no scale)"
+                )
 
         # Get project home directory for ribbon export
         project = QgsProject.instance()
@@ -570,6 +658,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                     shape_table_lengths = []
                     sigmoid_lengths = []
                     shape_arc_radius_factors = []
+                    shape_arc_radius_factors_landing = []
                     first_is_zero = False
                     last_is_end = False
                     use_shapes = False
@@ -580,6 +669,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                     if shape_distances_str:
                         try:
                             shape_distances_raw = parse_float_list(shape_distances_str)
+                            shape_distances_raw = self._shape_distances_to_cumulative(shape_distances_raw)
                             n_dist = len(shape_distances_raw)
                             if n_dist == 0:
                                 msg = f"Feature {feature.id()}: SHAPE_DISTANCES is empty. Provide at least one distance."
@@ -601,6 +691,9 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                             )
                             shape_arc_radius_factors = self._parse_shape_arc_radius_factors(
                                 shape_arc_radius_factors_str, n_dist
+                            )
+                            shape_arc_radius_factors_landing = self._parse_shape_arc_radius_factors_landing(
+                                shape_arc_radius_factors_landing_str, n_dist
                             )
 
                             use_shapes = True
@@ -625,18 +718,33 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                                     defaults_used.append(f"sigmoid={SHAPE_DEFAULT_SIGMOID_LENGTH_M}m")
                                 if not self._parse_comma_list(shape_arc_radius_factors_str):
                                     defaults_used.append(f"arc={SHAPE_DEFAULT_ARC_RADIUS_FACTOR}")
+                                if not self._parse_comma_list(shape_arc_radius_factors_landing_str):
+                                    defaults_used.append(f"landing_arc={SHAPE_DEFAULT_ARC_RADIUS_FACTOR_LANDING}")
                                 if defaults_used:
                                     feedback.pushInfo(
                                         f"Feature {feature.id()}: shape defaults applied: {', '.join(defaults_used)}"
                                     )
                                 feedback.pushInfo(f"Feature {feature.id()}: {len(shape_heights)} shape(s) configured")
-                                for i, (h, t, s, r) in enumerate(
-                                    zip(shape_heights, shape_table_lengths, sigmoid_lengths, shape_arc_radius_factors)
+                                for i, (dist_str, h, t, s, r, rl) in enumerate(
+                                    zip(
+                                        shape_distances_raw,
+                                        shape_heights,
+                                        shape_table_lengths,
+                                        sigmoid_lengths,
+                                        shape_arc_radius_factors,
+                                        shape_arc_radius_factors_landing,
+                                    )
                                 ):
-                                    arc_mode = "sigmoid" if r <= 0 else f"arc×{r:.2f}"
+                                    in_mode = self._shape_ramp_mode_label(r)
+                                    land_mode = self._shape_ramp_mode_label(rl)
+                                    dist_label = (
+                                        "end"
+                                        if dist_str.lower().strip() == 'end'
+                                        else f"{float(dist_str):.2f}m"
+                                    )
                                     feedback.pushInfo(
-                                        f"  Shape {i+1}: height={h:.2f}m, table_length={t:.2f}m, "
-                                        f"sigmoid_length={s:.2f}m, in-run={arc_mode}"
+                                        f"  Shape {i+1} @ {dist_label}: height={h:.2f}m, table_length={t:.2f}m, "
+                                        f"sigmoid_length={s:.2f}m, in-run={in_mode}, landing={land_mode}"
                                     )
                         except ValueError as e:
                             msg = f"Feature {feature.id()}: {e}"
@@ -666,6 +774,8 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                         shape_table_lengths if use_shapes else [],
                         sigmoid_lengths if use_shapes else [],
                         shape_arc_radius_factors if use_shapes else [],
+                        shape_arc_radius_factors_landing if use_shapes else [],
+                        shape_landing_length_factor,
                         first_is_zero,
                         last_is_end,
                         feedback
@@ -785,6 +895,35 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         return max(0.0, min(1.0, normalized))  # Clamp to [0, 1]
 
     @staticmethod
+    def _shape_uses_linear_ramp(arc_factor):
+        return arc_factor >= SHAPE_LINEAR_RAMP_FACTOR_MIN
+
+    @staticmethod
+    def _shape_uses_arc(arc_factor):
+        """Non-sigmoid ramp (circular arc or linear); used for landing-length scaling."""
+        return arc_factor > 0
+
+    @staticmethod
+    def _shape_ramp_mode_label(arc_factor):
+        if arc_factor <= 0:
+            return "sigmoid"
+        if AddCurveBankingToLineAlgorithm._shape_uses_linear_ramp(arc_factor):
+            return "linear"
+        return f"arc×{arc_factor:.2f}"
+
+    @staticmethod
+    def _shape_landing_length_m(
+        inrun_length_m, inrun_arc_factor, landing_arc_factor, landing_length_factor
+    ):
+        # Scale landing span only when at least one side uses arc; both 0 = sigmoid → same length as in-run.
+        if not (
+            AddCurveBankingToLineAlgorithm._shape_uses_arc(inrun_arc_factor)
+            or AddCurveBankingToLineAlgorithm._shape_uses_arc(landing_arc_factor)
+        ):
+            return inrun_length_m
+        return inrun_length_m * landing_length_factor
+
+    @staticmethod
     def _shape_inrun_arc_height_factor(t, L, R):
         """
         Circular-arc in-run height factor 0->1. Circle tangent to level at s=0, z(s)=R - sqrt(R^2 - s^2).
@@ -804,11 +943,23 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         return max(0.0, min(1.0, z_s / denom))
 
     def _shape_inrun_height_factor(self, t, L, arc_factor):
-        """In-run height factor 0→1: sigmoid when arc_factor ≤ 0, else circular arc."""
+        """In-run height factor 0→1: sigmoid (≤0), circular arc (1–98), or linear (≥99)."""
+        if self._shape_uses_linear_ramp(arc_factor):
+            return max(0.0, min(1.0, t))
         if arc_factor <= 0:
             return self.normalized_sigmoid(t, SHAPE_OUTRUN_SIGMOID_K)
         R = max(arc_factor * L, L)
         return self._shape_inrun_arc_height_factor(t, L, R)
+
+    def _shape_landing_height_factor(self, t, L, arc_factor):
+        """Landing height factor 1→0: sigmoid (≤0), circular arc (1–98), or linear (≥99)."""
+        if self._shape_uses_linear_ramp(arc_factor):
+            return max(0.0, min(1.0, 1.0 - t))
+        if arc_factor <= 0:
+            return 1.0 - self.normalized_sigmoid(t, SHAPE_OUTRUN_SIGMOID_K)
+        R = max(arc_factor * L, L)
+        # Time-reversed in-run: flat tangent at trail end (t=1), not 1-h(t) which flips the arc.
+        return self._shape_inrun_arc_height_factor(1.0 - t, L, R)
 
     @staticmethod
     def _segment_total_angle_rad(turning_angles, start_idx, end_idx):
@@ -983,7 +1134,9 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                            outer_edge_raise, ribbon_half_width=0.0,
                            use_shapes=False, shape_distances_raw=None,
                            shape_heights=None, shape_table_lengths=None, sigmoid_lengths=None,
-                           shape_arc_radius_factors=None, first_is_zero=False, last_is_end=False, feedback=None):
+                           shape_arc_radius_factors=None, shape_arc_radius_factors_landing=None,
+                           shape_landing_length_factor=SHAPE_LANDING_LENGTH_FACTOR_DEFAULT,
+                           first_is_zero=False, last_is_end=False, feedback=None):
         """
         Apply curve detection and banking to a linestring.
         Segment-based curve detection (same-sign turning angles, total angle and curvature threshold).
@@ -1091,7 +1244,13 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
         shape_z_offsets = [0.0] * len(vertices)
         if use_shapes and shape_distances_raw and shape_heights and shape_table_lengths and sigmoid_lengths:
             if not shape_arc_radius_factors:
-                shape_arc_radius_factors = [1.0] * len(shape_distances_raw)
+                shape_arc_radius_factors = [
+                    SHAPE_DEFAULT_ARC_RADIUS_FACTOR
+                ] * len(shape_distances_raw)
+            if not shape_arc_radius_factors_landing:
+                shape_arc_radius_factors_landing = [
+                    SHAPE_DEFAULT_ARC_RADIUS_FACTOR_LANDING
+                ] * len(shape_distances_raw)
             total_length = distances[-1] if distances else 0.0
             shapes = list(zip(
                 [float(d) for d in shape_distances_raw],
@@ -1099,6 +1258,7 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                 shape_table_lengths,
                 sigmoid_lengths,
                 shape_arc_radius_factors,
+                shape_arc_radius_factors_landing,
                 range(len(shape_distances_raw)),
             ))
             
@@ -1112,18 +1272,25 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                     first_table_len = shape_table_lengths[0]
                     first_sigmoid_len = sigmoid_lengths[0]
                     first_arc_factor = shape_arc_radius_factors[0]
+                    first_landing_factor = shape_arc_radius_factors_landing[0]
+                    first_landing_len = self._shape_landing_length_m(
+                        first_sigmoid_len,
+                        first_arc_factor,
+                        first_landing_factor,
+                        shape_landing_length_factor,
+                    )
                     half_table_length = first_table_len / 2.0
-                    half_wave_length = half_table_length + first_sigmoid_len
+                    half_wave_length = half_table_length + first_landing_len
                     if distance_along <= half_wave_length:
                         if distance_along <= half_table_length:
                             shape_z_offset = first_height
                         else:
-                            t = (distance_along - half_table_length) / first_sigmoid_len
+                            t = (distance_along - half_table_length) / first_landing_len
                             if t <= 1.0:
-                                inrun_val = self._shape_inrun_height_factor(
-                                    t, first_sigmoid_len, first_arc_factor
+                                landing_val = self._shape_landing_height_factor(
+                                    t, first_landing_len, first_landing_factor
                                 )
-                                shape_z_offset = first_height * (1.0 - inrun_val)
+                                shape_z_offset = first_height * landing_val
                             else:
                                 shape_z_offset = 0.0
                         shape_z_offset = max(0.0, shape_z_offset)
@@ -1134,17 +1301,27 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                     last_height = shape_heights[-1]
                     last_table_len = shape_table_lengths[-1]
                     last_sigmoid_len = sigmoid_lengths[-1]
+                    last_arc_factor = shape_arc_radius_factors[-1]
+                    last_landing_factor = shape_arc_radius_factors_landing[-1]
+                    last_landing_len = self._shape_landing_length_m(
+                        last_sigmoid_len,
+                        last_arc_factor,
+                        last_landing_factor,
+                        shape_landing_length_factor,
+                    )
                     dist_from_end = total_length - distance_along
                     half_table_length = last_table_len / 2.0
-                    half_wave_length = half_table_length + last_sigmoid_len
+                    half_wave_length = half_table_length + last_landing_len
                     if dist_from_end >= 0 and dist_from_end <= half_wave_length:
                         if dist_from_end <= half_table_length:
                             shape_z_offset = last_height
-                        elif dist_from_end <= half_table_length + last_sigmoid_len:
-                            t = (dist_from_end - half_table_length) / last_sigmoid_len
+                        elif dist_from_end <= half_table_length + last_landing_len:
+                            t = (dist_from_end - half_table_length) / last_landing_len
                             if t <= 1.0:
-                                sigmoid_val = self.normalized_sigmoid(t, SHAPE_OUTRUN_SIGMOID_K)
-                                shape_z_offset = last_height * (1.0 - sigmoid_val)
+                                landing_val = self._shape_landing_height_factor(
+                                    t, last_landing_len, last_landing_factor
+                                )
+                                shape_z_offset = last_height * landing_val
                             else:
                                 shape_z_offset = 0.0
                         else:
@@ -1153,13 +1330,16 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                         shape_z += shape_z_offset
                 
                 # Normal shapes
-                for shape_dist, shape_height, table_len, sigmoid_len, arc_factor, orig_idx in shapes:
+                for shape_dist, shape_height, table_len, sigmoid_len, arc_factor, landing_factor, orig_idx in shapes:
                     if first_is_zero and abs(shape_dist) < 1e-9:
                         continue
                     if last_is_end and abs(shape_dist - total_length) < 1e-9:
                         continue
                     
-                    total_wave_length = sigmoid_len + table_len + sigmoid_len
+                    landing_len = self._shape_landing_length_m(
+                        sigmoid_len, arc_factor, landing_factor, shape_landing_length_factor
+                    )
+                    total_wave_length = sigmoid_len + table_len + landing_len
                     dist_from_center = distance_along - shape_dist
                     
                     if abs(dist_from_center) <= total_wave_length / 2.0:
@@ -1175,10 +1355,12 @@ class AddCurveBankingToLineAlgorithm(QgsProcessingAlgorithm):
                         elif pos_from_wave_start <= sigmoid_len + table_len:
                             shape_z_offset = shape_height
                         else:
-                            t = (pos_from_wave_start - sigmoid_len - table_len) / sigmoid_len
+                            t = (pos_from_wave_start - sigmoid_len - table_len) / landing_len
                             if t <= 1.0:
-                                sigmoid_val = self.normalized_sigmoid(t, SHAPE_OUTRUN_SIGMOID_K)
-                                shape_z_offset = shape_height * (1.0 - sigmoid_val)
+                                landing_val = self._shape_landing_height_factor(
+                                    t, landing_len, landing_factor
+                                )
+                                shape_z_offset = shape_height * landing_val
                             else:
                                 shape_z_offset = 0.0
                         
