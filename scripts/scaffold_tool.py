@@ -288,6 +288,14 @@ def update_readme_tools_list(repo_root: str) -> None:
     write_text(readme_path, new_content)
 
 
+def _yaml_scalar_quote(value: str) -> str:
+    """Quote a YAML plain scalar so titles with ':' (e.g. 'TRAILISM: Foo') stay valid."""
+    if "'" in value:
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return f"'{value}'"
+
+
 def update_mkdocs_nav(mkdocs_path: str, title: str, slug: str) -> None:
     y = read_text(mkdocs_path)
     if f"tools/{slug}.md" in y:
@@ -296,19 +304,20 @@ def update_mkdocs_nav(mkdocs_path: str, title: str, slug: str) -> None:
     out_lines: List[str] = []
     i = 0
     inserted = False
+    nav_item = f"      - {_yaml_scalar_quote(title)}: tools/{slug}.md"
     while i < len(lines):
         line = lines[i]
         out_lines.append(line)
         if not inserted and line.strip() == "- Tools:":
             # Insert after the Tools: header; maintain existing 6-space indentation for items
-            out_lines.append(f"      - {title}: tools/{slug}.md")
+            out_lines.append(nav_item)
             inserted = True
         i += 1
     if not inserted:
         # Append a nav section if Tools not found
         out_lines.append("nav:")
         out_lines.append("  - Tools:")
-        out_lines.append(f"      - {title}: tools/{slug}.md")
+        out_lines.append(nav_item)
     write_text(mkdocs_path, "\n".join(out_lines) + "\n")
 
 

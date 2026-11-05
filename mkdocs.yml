@@ -56,10 +56,10 @@ extra:
 nav:
   - Home: index.md
   - Tools:
-      - TRAILISM: Grade Corridor Chords: tools/trailism-grade-corridor-chords.md
+      - 'TRAILISM: Grade Corridor Chords': tools/trailism-grade-corridor-chords.md
       - 'TRAILISM: Corner Fillets (min/max radius)': tools/trailism-corner-fillets-min-max-radius.md
       - 'TRAILISM: Corner Arcs (vertex circles, outside)': tools/trailism-corner-arcs-vertex-circles-outside.md
-      - TRAILISM__Transect_Profiles: tools/trailism-transect-profiles.md
+      - 'TRAILISM: Transect Profiles': tools/trailism-transect-profiles.md
       - 'TRAILISM: Round Corner by Min/Max Radius': tools/trailism-round-corner-by-min-max-radius.md
       - 'TRAILISM: Raster Replace DSM with DEM': tools/trailism-raster-replace-dsm-with-dem.md
       - 'TRAILISM: Raster Find Tree Tips (four-direction illumination)': tools/trailism-raster-find-tree-tips-four-direction-illumination.md
@@ -70,13 +70,13 @@ nav:
       - 'TRAILISM: GPX Checkpoint Times': tools/trailism-gpx-checkpoint-times.md
       - 'TRAILISM: Find Curves': tools/trailism-find-curves.md
       - 'TRAILISM: Trail Shaping': tools/trailism-trail-shaping.md
-      - Find Curves: tools/curve-detection.md
-      - Round Corner by Min/Max Radius: tools/round-corner-radius.md
-      - Round Corner with Fixed Radius: tools/round-corner-fixed-radius.md
-      - Cross-Section Profiles: tools/transect-profiles.md
-      - Raster Extrema to Points: tools/raster-extrema.md
-      - Raster Find Tree Tips: tools/raster-find-tree-tips.md
-      - Raster Replace DSM with DEM: tools/raster-replace.md
-      - Add Trail Shapes: tools/add-trail-shapes.md
+      - 'Find Curves': tools/curve-detection.md
+      - 'Round Corner by Min/Max Radius': tools/round-corner-radius.md
+      - 'Round Corner with Fixed Radius': tools/round-corner-fixed-radius.md
+      - 'Cross-Section Profiles': tools/transect-profiles.md
+      - 'Raster Extrema to Points': tools/raster-extrema.md
+      - 'Raster Find Tree Tips': tools/raster-find-tree-tips.md
+      - 'Raster Replace DSM with DEM': tools/raster-replace.md
+      - 'Add Trail Shapes': tools/add-trail-shapes.md
 
 
