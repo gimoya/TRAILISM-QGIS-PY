@@ -38,59 +38,123 @@ def write_text(path: str, content: str) -> None:
         f.write(content)
 
 
+def _method_return_region(py_src: str, method: str) -> Optional[Tuple[int, str]]:
+    """Find `def method(...):` and return (index_of_return_keyword, rest_of_source_from_return)."""
+    m = re.search(rf"def\s+{method}\s*\([^)]*\):", py_src)
+    if not m:
+        return None
+    # Allow blank lines / full-line comments between signature and return
+    tail = py_src[m.end() :]
+    rm = re.search(r"(?m)^\s*(return\b)", tail)
+    if not rm:
+        return None
+    abs_ret = m.end() + rm.start(1)
+    return abs_ret, py_src[abs_ret:]
+
+
 def infer_display_name(py_src: str) -> Optional[str]:
     # Try displayName: return self.tr('...') or return '...'
-    m = re.search(r"def\s+displayName\s*\(.*?\):\s*return\s+self\.tr\(\s*(['\"])(.*?)\1\s*\)", py_src, re.DOTALL)
+    found = _method_return_region(py_src, "displayName")
+    if not found:
+        return None
+    _idx, rest = found
+    m = re.match(r"return\s+self\.tr\(\s*(['\"])(.*?)\1\s*\)", rest, re.DOTALL)
     if m:
         return m.group(2).strip()
-    m = re.search(r"def\s+displayName\s*\(.*?\):\s*return\s*(['\"])(.*?)\1", py_src)
+    m = re.match(r"return\s*(['\"])(.*?)\1", rest, re.DOTALL)
     if m:
         return m.group(2).strip()
     return None
 
 
 def infer_algorithm_id(py_src: str) -> Optional[str]:
-    m = re.search(r"def\s+name\s*\(.*?\):\s*return\s*(['\"])(.*?)\1", py_src)
+    found = _method_return_region(py_src, "name")
+    if not found:
+        return None
+    _idx, rest = found
+    m = re.match(r"return\s*(['\"])(.*?)\1", rest, re.DOTALL)
     return m.group(2).strip() if m else None
 
 
-def infer_short_help(py_src: str) -> Optional[str]:
-    # shortHelpString returns self.tr('...') possibly concatenated. Find tr( and match to closing ), skipping string literals.
-    m = re.search(r"def\s+shortHelpString\s*\([^)]*\):\s*return\s+self\.tr\s*\(", py_src)
-    if not m:
+def _extract_string_expr(rest: str) -> Optional[str]:
+    """Parse `return <string-expr>` where expr is tr(...), (...), or adjacent literals."""
+    if not rest.startswith("return"):
         return None
-    start = m.end()
-    depth = 1
-    i = start
-    while i < len(py_src) and depth > 0:
-        # Skip string literals so parens inside don't break depth
-        if py_src[i] in ("'", '"') and (i == 0 or py_src[i - 1] != "\\"):
-            quote = py_src[i]
-            i += 1
-            while i < len(py_src):
-                if py_src[i] == "\\":
-                    i += 2
-                    continue
-                if py_src[i] == quote:
-                    i += 1
-                    break
+    body = rest[len("return") :].lstrip()
+    # return self.tr( ... )
+    if body.startswith("self.tr"):
+        m = re.match(r"self\.tr\s*\(", body)
+        if not m:
+            return None
+        start = m.end()
+        depth = 1
+        i = start
+        while i < len(body) and depth > 0:
+            if body[i] in ("'", '"') and (i == 0 or body[i - 1] != "\\"):
+                quote = body[i]
                 i += 1
-            continue
-        if py_src[i] == "(":
-            depth += 1
-        elif py_src[i] == ")":
-            depth -= 1
-        i += 1
-    if depth != 0:
+                while i < len(body):
+                    if body[i] == "\\":
+                        i += 2
+                        continue
+                    if body[i] == quote:
+                        i += 1
+                        break
+                    i += 1
+                continue
+            if body[i] == "(":
+                depth += 1
+            elif body[i] == ")":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            return None
+        expr = body[start : i - 1]
+    elif body.startswith("("):
+        # return ( "a" "b" ) or return ( "a", )
+        start = 1
+        depth = 1
+        i = start
+        while i < len(body) and depth > 0:
+            if body[i] in ("'", '"') and (i == 0 or body[i - 1] != "\\"):
+                quote = body[i]
+                i += 1
+                while i < len(body):
+                    if body[i] == "\\":
+                        i += 2
+                        continue
+                    if body[i] == quote:
+                        i += 1
+                        break
+                    i += 1
+                continue
+            if body[i] == "(":
+                depth += 1
+            elif body[i] == ")":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            return None
+        expr = body[start : i - 1]
+    else:
+        # return "..." or adjacent literals until newline/statement end
+        expr = body
+    lits = re.findall(r"(['\"])(.*?)\1", expr, re.DOTALL)
+    if not lits:
         return None
-    body = py_src[start : i - 1]
-    # Extract concatenated string literals inside tr(...)
-    lits = re.findall(r"(['\"])(.*?)\1", body, re.DOTALL)
     text = "".join(seg for _q, seg in lits)
-    # Normalize whitespace
     text = re.sub(r"\r\n|\r", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def infer_short_help(py_src: str) -> Optional[str]:
+    # shortHelpString: return self.tr(...), return (...), or return "..."
+    found = _method_return_region(py_src, "shortHelpString")
+    if not found:
+        return None
+    _idx, rest = found
+    return _extract_string_expr(rest)
 
 
 def infer_parameters(py_src: str) -> List[Dict[str, Optional[str]]]:
@@ -321,8 +385,52 @@ def update_mkdocs_nav(mkdocs_path: str, title: str, slug: str) -> None:
     write_text(mkdocs_path, "\n".join(out_lines) + "\n")
 
 
-def _scaffold_for_file(script_path: str, repo_root: str, title: Optional[str], slug_arg: Optional[str]) -> None:
-    """Generate/overwrite sidecar .md, docs/tools/<slug>.md, and update mkdocs nav for one tool."""
+def rebuild_mkdocs_tools_nav(mkdocs_path: str, entries: List[Tuple[str, str]]) -> None:
+    """Replace the Tools: children in mkdocs.yml with the given (title, slug) list."""
+    y = read_text(mkdocs_path)
+    lines = y.splitlines()
+    out: List[str] = []
+    i = 0
+    rebuilt = False
+    while i < len(lines):
+        line = lines[i]
+        if line.strip() == "- Tools:":
+            out.append(line)
+            i += 1
+            # Skip existing Tools children (indented more than "  - Tools:")
+            while i < len(lines):
+                nxt = lines[i]
+                if nxt.strip() == "" or not nxt.startswith("      - "):
+                    break
+                i += 1
+            for title, slug in entries:
+                out.append(f"      - {_yaml_scalar_quote(title)}: tools/{slug}.md")
+            rebuilt = True
+            continue
+        out.append(line)
+        i += 1
+    if not rebuilt:
+        out.append("nav:")
+        out.append("  - Tools:")
+        for title, slug in entries:
+            out.append(f"      - {_yaml_scalar_quote(title)}: tools/{slug}.md")
+    write_text(mkdocs_path, "\n".join(out) + "\n")
+
+
+def _is_scaffoldable_tool(filename: str) -> bool:
+    """Skip WIP / non-published script copies."""
+    if not filename.startswith("TRAILISM__") or not filename.endswith(".py"):
+        return False
+    # Parallel WIP of Trail Shaping — not a published toolbox entry yet
+    if "CADStyleMeasurements" in filename:
+        return False
+    return True
+
+
+def _scaffold_for_file(
+    script_path: str, repo_root: str, title: Optional[str], slug_arg: Optional[str], *, update_nav: bool = True
+) -> Tuple[str, str]:
+    """Generate/overwrite sidecar .md and docs/tools/<slug>.md. Returns (display_name, slug)."""
     py_src = read_text(script_path)
     display_name = title or infer_display_name(py_src) or os.path.splitext(os.path.basename(script_path))[0]
     alg_id = infer_algorithm_id(py_src)
@@ -348,11 +456,30 @@ def _scaffold_for_file(script_path: str, repo_root: str, title: Optional[str], s
     docs_page = f"# {display_name}\n\n--8<-- \"{include_rel}\"\n\n"
     write_text(docs_page_path, docs_page)
 
-    mkdocs_path = os.path.join(repo_root, "mkdocs.yml")
-    update_mkdocs_nav(mkdocs_path, display_name, slug)
+    if update_nav:
+        mkdocs_path = os.path.join(repo_root, "mkdocs.yml")
+        update_mkdocs_nav(mkdocs_path, display_name, slug)
 
     print(f"Created sidecar: {os.path.relpath(sidecar_path, repo_root)}")
     print(f"Created docs page: {os.path.relpath(docs_page_path, repo_root)}")
+    return display_name, slug
+
+
+def _prune_orphan_docs_pages(repo_root: str, keep_slugs: List[str]) -> None:
+    """Remove docs/tools/*.md pages not in keep_slugs (except _templates)."""
+    tools_dir = os.path.join(repo_root, "docs", "tools")
+    if not os.path.isdir(tools_dir):
+        return
+    keep = set(keep_slugs)
+    for name in sorted(os.listdir(tools_dir)):
+        if not name.endswith(".md"):
+            continue
+        slug = name[:-3]
+        if slug in keep:
+            continue
+        path = os.path.join(tools_dir, name)
+        os.remove(path)
+        print(f"Removed orphan docs page: docs/tools/{name}")
 
 
 def main() -> int:
@@ -372,12 +499,13 @@ def main() -> int:
     args = ap.parse_args()
 
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    mkdocs_path = os.path.join(repo_root, "mkdocs.yml")
 
     if args.all:
-        # Bulk mode: find all TRAILISM__*.py in repo root and scaffold each one
+        # Bulk mode: find all published TRAILISM__*.py in repo root and scaffold each one
         py_files: List[str] = []
         for name in sorted(os.listdir(repo_root)):
-            if not name.startswith("TRAILISM__") or not name.endswith(".py"):
+            if not _is_scaffoldable_tool(name):
                 continue
             py_path = os.path.join(repo_root, name)
             if os.path.isfile(py_path):
@@ -387,12 +515,19 @@ def main() -> int:
             return 0
 
         print(f"Scaffolding {len(py_files)} tools from TRAILISM__*.py in {repo_root}...")
+        entries: List[Tuple[str, str]] = []
         for script_path in py_files:
-            _scaffold_for_file(script_path, repo_root, None, None)
+            title, slug = _scaffold_for_file(script_path, repo_root, None, None, update_nav=False)
+            entries.append((title, slug))
+
+        # Nav = live tools only (sorted by title); drop ghost entries
+        entries_sorted = sorted(entries, key=lambda t: t[0].lower())
+        rebuild_mkdocs_tools_nav(mkdocs_path, entries_sorted)
+        _prune_orphan_docs_pages(repo_root, [slug for _t, slug in entries_sorted])
 
         # After all files, refresh README tools list once from all discovered py+md pairs.
         update_readme_tools_list(repo_root)
-        print("Updated mkdocs.yml nav")
+        print("Rebuilt mkdocs.yml Tools nav")
         print("Updated README.md tools list")
 
         if args.validate:

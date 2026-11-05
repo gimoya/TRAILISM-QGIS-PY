@@ -1,5 +1,7 @@
 ## TRAILISM: Raster Extrema to Points
 
+TRAILISM ALGORITHM:\n\nFinds minimum and maximum raster values within each polygon feature.\nOutputs points at the locations of these extrema.\n\nParameters:\n- Extrema type: find maxima (peaks), minima (depressions), or both\n\nPolygon layer is required - finds extrema within each polygon feature.
+
 ### Algorithm id
 `raster_extrema`
 

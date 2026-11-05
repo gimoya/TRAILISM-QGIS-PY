@@ -1,24 +1,25 @@
 ## TRAILISM: Export Attribute Table to XLSX
 
-One-shot export of a vector layer attribute table to Excel (`.xlsx`). Data columns only — no geometry, no WKT, no metadata. File name = layer name.
+TRAILISM ALGORITHM:\n\nExports the attribute table of a vector layer to Excel (.xlsx).\nOnly data columns — no geometry, no WKT, no layer metadata.\n\nMinimal input:\n- Layer (defaults to the active layer when available)\n- Output folder: last-used folder first, else layer source folder\n\nFile name is always the layer name + .xlsx.
 
 ### Algorithm id
 `export_attribute_table_xlsx`
 
 ### Inputs
 - **Input layer** (VectorLayer)
-- **Output folder** (Folder, optional; default = last-used, else layer source dir)
+- **Output folder** (File)
 
-### Outputs
-- `{layer_name}.xlsx` in the chosen folder
+### Parameters
+- **Input layer** (VectorLayer)
+- **Output folder** (File, default default_dir)
 
 ### Usage
-Processing Toolbox → TRAILISM → Export Attribute Table to XLSX
-
+- Python:
 ```python
 import processing
-processing.run('script:export_attribute_table_xlsx', {
-    'INPUT': 'my_layer_id',
-    'OUTPUT_DIR': r'C:\exports',
+processing.run('export_attribute_table_xlsx', {
+    'INPUT': ...,
+    'OUTPUT_DIR': ...,
+    'OUTPUT': 'memory:'
 })
 ```

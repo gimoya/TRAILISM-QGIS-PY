@@ -1,13 +1,6 @@
 ## TRAILISM: Corner Fillets (min/max radius)
 
-**Bisector fillets** (classical CAD-style fillets): each corner becomes a circular arc **inside** the turn. The arc center sits on the **interior angle bisector**; the arc is **tangent to both incoming and outgoing segments** (tangent points lie on those legs—not circles drawn on the vertex itself).
-
-- **Cleanup:** You can enforce a minimum distance between vertices along the polyline so short noise segments are removed before filleting.
-- **Radius:** The geometric limit per corner matches **TRAILISM: Round Corner by Min/Max Radius**: turning angle and leg lengths set how large a fillet can be. User Min/Max radius clamp that value. If the requested **minimum** radius is larger than geometry allows, the fillet uses **what the corner can support** (no overshoot past the segment).
-- **Discretization:** Arcs are broken into straight segments with chord length ≤ **Max chord length**.
-- **Berms:** Optional extra lines: offset arcs **outside** the fillet when radius is within your threshold (same pattern as the older round-corner berm output).
-
-For **vertex-centered** circles and **outer common tangents**, use **TRAILISM: Corner Arcs (vertex circles, outside)**.
+TRAILISM ALGORITHM (bisector fillets):\n\n- Optional: cleans vertices that are closer than a minimum spacing along the polyline.\n- At each corner, builds a **fillet**: the arc lies inside the turn; its center sits on the **interior angle bisector** (incenter-based), and the arc is **tangent to both legs** (tangent points on the adjacent segments).\n- Fillet radius uses the same geometric allowance as “Round corner by min/max radius”, then clamps to your Min/Max radius.\n- Arcs are approximated with straight segments so chord length ≤ Max chord length.\n- Optional berm output: offset arc outside the fillet (same as the original round-corner tool).\n\nThis is **not** vertex-centered rounding. For circles centered on each vertex with outer tangents, use “TRAILISM: Corner Arcs (vertex circles, outside)”.
 
 ### Algorithm id
 `corner_fillets_min_max_radius`

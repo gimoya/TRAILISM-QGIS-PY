@@ -1,4 +1,4 @@
-# TRAILISM__Transect_Profiles
+# TRAILISM: Cross-Section Profiles
 
 --8<-- "TRAILISM__Transect_Profiles.md"
 
